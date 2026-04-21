@@ -1,0 +1,7 @@
+{
+  "dart.flutterRunAdditionalArgs": [
+    "-d",
+    "emulator-5554"
+  ],
+  "dart.previewFlutterUiGuides": true
+}
