@@ -13,7 +13,7 @@ dependencies:
 
   cupertino_icons: ^1.0.8
   flutter_blue_plus: ^2.1.2
-  shared_preferences: ^2.5.3
+  flutter_secure_storage: ^9.2.4
   supabase_flutter: ^2.0.2
 
 dev_dependencies:

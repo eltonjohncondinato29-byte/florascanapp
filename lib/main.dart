@@ -3,14 +3,40 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 // Global reference for Supabase
 late final SupabaseClient supabase;
-late final SharedPreferences appPrefs;
+const appSecureStorage = FlutterSecureStorage();
 const _rememberMeKey = 'remember_me';
 const _rememberedEmailKey = 'remembered_email';
+
+// Rate limiting constants
+const _loginAttemptsKey = 'login_attempts';
+const _loginAttemptTimestampKey = 'login_attempt_timestamp';
+const _maxLoginAttempts = 5;
+const _loginCooldownDuration = Duration(minutes: 5);
+
+// Session expiry constants
+const _lastActiveTimeKey = 'last_active_time';
+
+Future<bool> _readSecureBool(String key) async {
+  return await appSecureStorage.read(key: key) == 'true';
+}
+
+Future<void> _writeSecureBool(String key, bool value) async {
+  await appSecureStorage.write(key: key, value: value.toString());
+}
+
+Future<int> _readSecureInt(String key) async {
+  final value = await appSecureStorage.read(key: key);
+  return int.tryParse(value ?? '') ?? 0;
+}
+
+Future<void> _writeSecureInt(String key, int value) async {
+  await appSecureStorage.write(key: key, value: value.toString());
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,7 +48,6 @@ Future<void> main() async {
   );
 
   supabase = Supabase.instance.client;
-  appPrefs = await SharedPreferences.getInstance();
   runApp(const FloraScanApp());
 }
 
@@ -48,14 +73,60 @@ class FloraScanApp extends StatefulWidget {
   State<FloraScanApp> createState() => _FloraScanAppState();
 }
 
-class _FloraScanAppState extends State<FloraScanApp> {
+class _FloraScanAppState extends State<FloraScanApp>
+    with WidgetsBindingObserver {
   bool _authenticated = false;
   bool _authReady = false;
+  late AppLifecycleListener _lifecycleListener;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeAuthState();
+
+    // Set up lifecycle listener for session expiry
+    _lifecycleListener = AppLifecycleListener(
+      onShow: _handleAppResumed,
+      onPause: _handleAppPaused,
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _lifecycleListener.dispose();
+    super.dispose();
+  }
+
+  /// Handles app being shown/resumed
+  Future<void> _handleAppResumed() async {
+    final lastActiveTime = await _readSecureInt(_lastActiveTimeKey);
+    if (lastActiveTime == 0) return; // First app launch
+
+    final lastActive = DateTime.fromMillisecondsSinceEpoch(lastActiveTime);
+    final now = DateTime.now();
+    const sessionTimeout = Duration(minutes: 5);
+
+    // If more than 5 minutes have passed, expire the session
+    if (now.difference(lastActive) > sessionTimeout) {
+      await supabase.auth.signOut();
+      if (!mounted) return;
+      setState(() {
+        _authenticated = false;
+      });
+    }
+  }
+
+  /// Handles app being paused/minimized
+  void _handleAppPaused() {
+    // Record the time when app was paused
+    unawaited(
+      _writeSecureInt(
+        _lastActiveTimeKey,
+        DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
   }
 
   Future<void> _handleSignOut() async {
@@ -66,8 +137,10 @@ class _FloraScanAppState extends State<FloraScanApp> {
   void _handleSignedIn() => setState(() => _authenticated = true);
 
   Future<void> _initializeAuthState() async {
-    final hasSavedPreference = appPrefs.containsKey(_rememberMeKey);
-    final shouldRemember = appPrefs.getBool(_rememberMeKey) ?? false;
+    final hasSavedPreference = await appSecureStorage.containsKey(
+      key: _rememberMeKey,
+    );
+    final shouldRemember = await _readSecureBool(_rememberMeKey);
     final hasSession = supabase.auth.currentUser != null;
 
     if (hasSession && hasSavedPreference && !shouldRemember) {
@@ -191,9 +264,10 @@ class _AuthPageState extends State<AuthPage> {
     setState(() {}); // rebuild to update the strength bar live
   }
 
-  void _loadRememberedLogin() {
-    final shouldRemember = appPrefs.getBool(_rememberMeKey) ?? false;
-    final rememberedEmail = appPrefs.getString(_rememberedEmailKey) ?? '';
+  Future<void> _loadRememberedLogin() async {
+    final shouldRemember = await _readSecureBool(_rememberMeKey);
+    final rememberedEmail =
+        await appSecureStorage.read(key: _rememberedEmailKey) ?? '';
 
     if (!mounted) return;
     setState(() {
@@ -205,12 +279,12 @@ class _AuthPageState extends State<AuthPage> {
   }
 
   Future<void> _persistLoginPreference(String email) async {
-    await appPrefs.setBool(_rememberMeKey, _rememberMe);
+    await _writeSecureBool(_rememberMeKey, _rememberMe);
     if (_rememberMe) {
-      await appPrefs.setString(_rememberedEmailKey, email);
+      await appSecureStorage.write(key: _rememberedEmailKey, value: email);
       return;
     }
-    await appPrefs.remove(_rememberedEmailKey);
+    await appSecureStorage.delete(key: _rememberedEmailKey);
   }
 
   Future<void> _showForgotPasswordDialog() async {
@@ -325,10 +399,20 @@ class _AuthPageState extends State<AuthPage> {
 
     final email = _emailController.text.trim();
     final username = _usernameController.text.trim();
-    final password = _passwordController.text.trim();
+    final password = _passwordController.text;
 
     if (email.isEmpty || password.isEmpty || (!_isLogin && username.isEmpty)) {
       setState(() => _errorMessage = 'Please fill all required fields.');
+      return;
+    }
+
+    // Check if user is in cooldown (only for login)
+    if (_isLogin && await _isInCooldown()) {
+      final remainingSeconds = await _getRemainingCooldownSeconds();
+      setState(
+        () => _errorMessage =
+            'Too many failed login attempts. Try again in ${_formatCooldownTime(remainingSeconds)}',
+      );
       return;
     }
 
@@ -350,10 +434,26 @@ class _AuthPageState extends State<AuthPage> {
           password: password,
         );
         if (response.user == null && response.session == null) {
-          setState(
-            () => _errorMessage = 'Unable to sign in. Check your credentials.',
-          );
+          // Login failed - increment failed attempts
+          await _incrementLoginAttempts();
+          final attempts = await _readSecureInt(_loginAttemptsKey);
+          final remainingAttempts = _maxLoginAttempts - attempts;
+
+          if (remainingAttempts <= 0) {
+            final remainingSeconds = await _getRemainingCooldownSeconds();
+            setState(
+              () => _errorMessage =
+                  'Account locked. Try again in ${_formatCooldownTime(remainingSeconds)}',
+            );
+          } else {
+            setState(
+              () => _errorMessage =
+                  'Unable to sign in. Check your credentials. ($remainingAttempts attempts remaining)',
+            );
+          }
         } else {
+          // Login successful - reset failed attempts
+          await _resetLoginAttempts();
           await _persistLoginPreference(email);
           widget.onSignedIn();
         }
@@ -432,6 +532,57 @@ class _AuthPageState extends State<AuthPage> {
       return false;
     }
     return true;
+  }
+
+  // ─── Rate Limiting Methods ────────────────────────────────────────────────
+  /// Increments login attempt counter
+  Future<void> _incrementLoginAttempts() async {
+    final attempts = await _readSecureInt(_loginAttemptsKey);
+    await _writeSecureInt(_loginAttemptsKey, attempts + 1);
+    await _writeSecureInt(
+      _loginAttemptTimestampKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  /// Resets login attempt counter
+  Future<void> _resetLoginAttempts() async {
+    await appSecureStorage.delete(key: _loginAttemptsKey);
+    await appSecureStorage.delete(key: _loginAttemptTimestampKey);
+  }
+
+  /// Checks if user is currently in cooldown period
+  Future<bool> _isInCooldown() async {
+    final attempts = await _readSecureInt(_loginAttemptsKey);
+    if (attempts < _maxLoginAttempts) return false;
+
+    final lastAttemptTime = await _readSecureInt(_loginAttemptTimestampKey);
+    final lastAttempt = DateTime.fromMillisecondsSinceEpoch(lastAttemptTime);
+    final now = DateTime.now();
+
+    final isInCooldown = now.difference(lastAttempt) < _loginCooldownDuration;
+    if (!isInCooldown) {
+      _resetLoginAttempts();
+    }
+    return isInCooldown;
+  }
+
+  /// Gets remaining cooldown time in seconds
+  Future<int> _getRemainingCooldownSeconds() async {
+    final lastAttemptTime = await _readSecureInt(_loginAttemptTimestampKey);
+    final lastAttempt = DateTime.fromMillisecondsSinceEpoch(lastAttemptTime);
+    final now = DateTime.now();
+    final remaining =
+        _loginCooldownDuration.inSeconds -
+        now.difference(lastAttempt).inSeconds;
+    return remaining > 0 ? remaining : 0;
+  }
+
+  /// Formats remaining cooldown time
+  String _formatCooldownTime(int seconds) {
+    final minutes = seconds ~/ 60;
+    final secs = seconds % 60;
+    return '$minutes:${secs.toString().padLeft(2, '0')}';
   }
 
   Widget _buildTextField({
