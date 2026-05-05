@@ -22,23 +22,29 @@ const _loginCooldownDuration = Duration(minutes: 5);
 // Session expiry constants
 const _lastActiveTimeKey = 'last_active_time';
 
+// ========== GLOBAL UTILITY FUNCTIONS ==========
+/// Reads a boolean value from secure storage by key
 Future<bool> _readSecureBool(String key) async {
   return await appSecureStorage.read(key: key) == 'true';
 }
 
+/// Writes a boolean value to secure storage by key
 Future<void> _writeSecureBool(String key, bool value) async {
   await appSecureStorage.write(key: key, value: value.toString());
 }
 
+/// Reads an integer value from secure storage by key
 Future<int> _readSecureInt(String key) async {
   final value = await appSecureStorage.read(key: key);
   return int.tryParse(value ?? '') ?? 0;
 }
 
+/// Writes an integer value to secure storage by key
 Future<void> _writeSecureInt(String key, int value) async {
   await appSecureStorage.write(key: key, value: value.toString());
 }
 
+/// Main application entry point - initializes Supabase and runs the app
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -67,6 +73,7 @@ const kTextLight = Color(0xFF8A8A8A);
 const kDivider = Color(0xFFEEEEEE);
 
 // ==================== APP ROOT / AUTH GATE ====================
+/// Root widget - manages authentication state and theme mode
 class FloraScanApp extends StatefulWidget {
   const FloraScanApp({super.key});
 
@@ -101,7 +108,8 @@ class _FloraScanAppState extends State<FloraScanApp>
     super.dispose();
   }
 
-  /// Handles app being shown/resumed
+  /// Handles app being resumed - checks for session timeout
+  /// If more than 5 minutes have passed, signs out the user
   Future<void> _handleAppResumed() async {
     final lastActiveTime = await _readSecureInt(_lastActiveTimeKey);
     if (lastActiveTime == 0) return; // First app launch
@@ -120,7 +128,7 @@ class _FloraScanAppState extends State<FloraScanApp>
     }
   }
 
-  /// Handles app being paused/minimized
+  /// Handles app being paused - records the time for session timeout tracking
   void _handleAppPaused() {
     // Record the time when app was paused
     unawaited(
@@ -131,13 +139,16 @@ class _FloraScanAppState extends State<FloraScanApp>
     );
   }
 
+  /// Handles user sign-out - clears authentication state
   Future<void> _handleSignOut() async {
     await supabase.auth.signOut();
     setState(() => _authenticated = false);
   }
 
+  /// Handles successful sign-in - updates authentication state
   void _handleSignedIn() => setState(() => _authenticated = true);
 
+  /// Initializes authentication state - signs out user on app start to show login screen
   Future<void> _initializeAuthState() async {
     // Always sign out on app start to show login screen
     await supabase.auth.signOut();
@@ -186,6 +197,7 @@ class _FloraScanAppState extends State<FloraScanApp>
 
 // ─── Auth Page ────────────────────────────────────────────────────────────────
 
+/// Authentication page - handles login and signup functionality
 class AuthPage extends StatefulWidget {
   const AuthPage({super.key, required this.onSignedIn});
   final VoidCallback onSignedIn;
@@ -221,7 +233,7 @@ class _AuthPageState extends State<AuthPage> {
 
   // ─── Password Strength Validation ─────────────────────────────────────────
 
-  /// Returns null if valid, or an error string describing what's missing.
+  /// Validates password strength - requires 8+ chars, uppercase, lowercase, number, and symbol
   String? _validatePassword(String password) {
     if (password.length < 8) {
       return 'Password must be at least 8 characters.';
@@ -243,7 +255,7 @@ class _AuthPageState extends State<AuthPage> {
     return null;
   }
 
-  /// Returns a color-coded strength label.
+  /// Calculates password strength level (weak/medium/strong) based on criteria met
   _PasswordStrength _getStrength(String password) {
     int score = 0;
     if (password.length >= 8) {
@@ -271,10 +283,12 @@ class _AuthPageState extends State<AuthPage> {
     return _PasswordStrength.strong;
   }
 
+  /// Callback triggered on password change to update strength indicator
   void _onPasswordChanged(String value) {
     setState(() {}); // rebuild to update the strength bar live
   }
 
+  /// Loads previously remembered email if 'Remember Me' was checked
   Future<void> _loadRememberedLogin() async {
     final shouldRemember = await _readSecureBool(_rememberMeKey);
     final rememberedEmail =
@@ -289,6 +303,7 @@ class _AuthPageState extends State<AuthPage> {
     });
   }
 
+  /// Saves or clears the 'Remember Me' preference and email
   Future<void> _persistLoginPreference(String email) async {
     await _writeSecureBool(_rememberMeKey, _rememberMe);
     if (_rememberMe) {
@@ -298,6 +313,7 @@ class _AuthPageState extends State<AuthPage> {
     await appSecureStorage.delete(key: _rememberedEmailKey);
   }
 
+  /// Shows forgot password dialog - allows user to request password reset email
   Future<void> _showForgotPasswordDialog() async {
     final resetEmailController = TextEditingController(
       text: _emailController.text.trim(),
@@ -405,6 +421,7 @@ class _AuthPageState extends State<AuthPage> {
     resetEmailController.dispose();
   }
 
+  /// Submits login or signup request - handles authentication flow
   Future<void> _submit() async {
     setState(() => _errorMessage = null);
 
@@ -523,6 +540,7 @@ class _AuthPageState extends State<AuthPage> {
     }
   }
 
+  /// Gets remote user count from database to check signup limit
   Future<int?> _getRemoteUserCount() async {
     for (final table in ['profiles', 'users']) {
       try {
@@ -533,6 +551,7 @@ class _AuthPageState extends State<AuthPage> {
     return null;
   }
 
+  /// Checks if signup limit has been reached
   Future<bool> _checkSignupLimit() async {
     final remoteCount = await _getRemoteUserCount();
     if (remoteCount != null && remoteCount >= _signupLimit) {
@@ -546,7 +565,7 @@ class _AuthPageState extends State<AuthPage> {
   }
 
   // ─── Rate Limiting Methods ────────────────────────────────────────────────
-  /// Increments login attempt counter
+  /// Increments failed login attempt counter in secure storage
   Future<void> _incrementLoginAttempts() async {
     final attempts = await _readSecureInt(_loginAttemptsKey);
     await _writeSecureInt(_loginAttemptsKey, attempts + 1);
@@ -556,13 +575,13 @@ class _AuthPageState extends State<AuthPage> {
     );
   }
 
-  /// Resets login attempt counter
+  /// Resets failed login attempt counter after successful login
   Future<void> _resetLoginAttempts() async {
     await appSecureStorage.delete(key: _loginAttemptsKey);
     await appSecureStorage.delete(key: _loginAttemptTimestampKey);
   }
 
-  /// Checks if user is currently in cooldown period
+  /// Checks if user is currently in cooldown period after max failed attempts
   Future<bool> _isInCooldown() async {
     final attempts = await _readSecureInt(_loginAttemptsKey);
     if (attempts < _maxLoginAttempts) return false;
@@ -578,7 +597,7 @@ class _AuthPageState extends State<AuthPage> {
     return isInCooldown;
   }
 
-  /// Gets remaining cooldown time in seconds
+  /// Calculates remaining cooldown time in seconds
   Future<int> _getRemainingCooldownSeconds() async {
     final lastAttemptTime = await _readSecureInt(_loginAttemptTimestampKey);
     final lastAttempt = DateTime.fromMillisecondsSinceEpoch(lastAttemptTime);
@@ -589,13 +608,14 @@ class _AuthPageState extends State<AuthPage> {
     return remaining > 0 ? remaining : 0;
   }
 
-  /// Formats remaining cooldown time
+  /// Formats cooldown time as MM:SS string
   String _formatCooldownTime(int seconds) {
     final minutes = seconds ~/ 60;
     final secs = seconds % 60;
     return '$minutes:${secs.toString().padLeft(2, '0')}';
   }
 
+  /// Builds a reusable text input field for email/username/password
   Widget _buildTextField({
     required String hint,
     required TextEditingController controller,
@@ -653,7 +673,7 @@ class _AuthPageState extends State<AuthPage> {
     );
   }
 
-  /// Password strength indicator bar (shown on signup only)
+  /// Builds password strength indicator bar with visual feedback (shown on signup only)
   Widget _buildPasswordStrengthBar(String password) {
     if (password.isEmpty) return const SizedBox.shrink();
     final strength = _getStrength(password);
@@ -996,6 +1016,7 @@ class LeafScanReport {
   final String fertilizer;
 
   // Convert to JSON for storage
+  /// Converts LeafScanReport to JSON for secure storage
   Map<String, dynamic> toJson() => {
     'leafName': leafName,
     'timestamp': timestamp.toIso8601String(),
@@ -1008,6 +1029,7 @@ class LeafScanReport {
   };
 
   // Create from JSON
+  /// Creates LeafScanReport from JSON data
   factory LeafScanReport.fromJson(Map<String, dynamic> json) => LeafScanReport(
     leafName: json['leafName'] as String,
     timestamp: DateTime.parse(json['timestamp'] as String),
@@ -1073,12 +1095,14 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // Get user-specific storage key
+  /// Generates user-specific storage key for leaf scan reports
   String _getUserReportsKey() {
     final userId = supabase.auth.currentUser?.id ?? 'unknown';
     return 'leaf_scan_reports_$userId';
   }
 
   // Save reports to secure storage (user-specific)
+  /// Saves all leaf scan reports to secure storage (user-specific)
   Future<void> _saveReports() async {
     final jsonList = _reports.map((r) => r.toJson()).toList();
     final jsonString = jsonEncode(jsonList);
@@ -1086,6 +1110,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // Load reports from secure storage (user-specific)
+  /// Loads all leaf scan reports from secure storage (user-specific)
   Future<void> _loadReports() async {
     try {
       final jsonString = await appSecureStorage.read(key: _getUserReportsKey());
@@ -1107,6 +1132,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  /// Starts Bluetooth scan to find nearby leaf measurement devices
   Future<void> _startScan() async {
     if (_isScanning) return;
     setState(() {
@@ -1145,6 +1171,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  /// Connects to a selected Bluetooth device and discovers its services
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await device.connect(
@@ -1179,6 +1206,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  /// Reads chlorophyll value from connected device or simulates data
   Future<void> _readChlorophyllValue() async {
     if (_isConnected && _chlorophyllCharacteristic != null) {
       try {
@@ -1203,6 +1231,7 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
+  /// Parses raw Bluetooth data into chlorophyll index value
   int _parseChlorophyllData(List<int> data) {
     if (data.isEmpty) return 0;
     if (data.length == 1) return data.first.clamp(0, 100);
@@ -1210,6 +1239,7 @@ class _MyHomePageState extends State<MyHomePage> {
     return combined.clamp(0, 100);
   }
 
+  /// Generates fertilizer recommendation based on chlorophyll level
   String _fertilizerRecommendation(int value) {
     if (value >= 55) return 'Healthy leaf — no extra fertilizer required.';
     if (value >= 40) {
@@ -1218,12 +1248,14 @@ class _MyHomePageState extends State<MyHomePage> {
     return 'Low chlorophyll — apply nitrogen-rich fertilizer.';
   }
 
+  /// Determines leaf health status (Healthy/Mild stress/Needs attention) based on chlorophyll
   String _leafHealthStatus(int value) {
     if (value >= 55) return 'Healthy';
     if (value >= 40) return 'Mild stress';
     return 'Needs attention';
   }
 
+  /// Saves current scan report to local storage and cloud database
   Future<void> _saveScanReport() async {
     final name = _leafNameController.text.trim();
     final lengthCm = double.tryParse(_lengthController.text) ?? 0;
@@ -1275,6 +1307,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  /// Updates selected tab index to switch between different app screens
   void _selectTab(int index) => setState(() => _selectedIndex = index);
 
   // ─── Bottom Nav ──────────────────────────────────────────────────────────
@@ -1297,6 +1330,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ==================== BOTTOM NAVIGATION ====================
+  /// Builds the bottom navigation bar with 5 tabs including center scan button
   Widget _buildBottomNav() {
     final items = [
       {'icon': Icons.home_filled, 'label': 'Dashboard'},
@@ -1387,6 +1421,7 @@ class _MyHomePageState extends State<MyHomePage> {
   // ─── Dashboard Tab ────────────────────────────────────────────────────────
 
   // ==================== DASHBOARD TAB ====================
+  /// Displays dashboard with current scan status, recent activity, and device info
   Widget _buildDashboardTab() {
     final user = supabase.auth.currentUser;
     final username =
@@ -1686,6 +1721,8 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  /// Builds a reusable dashboard card container with shadow and rounding
+  /// Builds a stylized dashboard card with shadow and custom styling
   Widget _dashCard({required Widget child}) {
     return Container(
       width: double.infinity,
@@ -1707,7 +1744,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // ─── History Tab ──────────────────────────────────────────────────────────
 
-  // ==================== HISTORY TAB ====================
+  /// Shows all previous leaf scan records in chronological order
   Widget _buildHistoryTab() {
     return SafeArea(
       child: Column(
@@ -1807,6 +1844,7 @@ class _MyHomePageState extends State<MyHomePage> {
   // ─── Scan Tab ─────────────────────────────────────────────────────────────
 
   // ==================== SCAN TAB ====================
+  /// Main scanning interface - shows camera frame, inputs, and device controls
   Widget _buildScanTab() {
     return SafeArea(
       child: Column(
@@ -2050,6 +2088,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ==================== SCAN INPUT FIELD ====================
+  /// Builds a text input field for scan data (name, length, width)
   Widget _scanField(
     String hint,
     TextEditingController controller, {
@@ -2089,7 +2128,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // ─── Reports Tab ──────────────────────────────────────────────────────────
 
-  // ==================== REPORTS TAB ====================
+  /// Shows detailed analysis reports for all completed leaf measurements
   Widget _buildReportsTab() {
     return SafeArea(
       child: Column(
@@ -2196,7 +2235,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // ─── Profile Tab ──────────────────────────────────────────────────────────
 
-  // ==================== PROFILE TAB ====================
+  /// Displays user profile with account info and sign-out option
   Widget _buildProfileTab() {
     final user = supabase.auth.currentUser;
     final username =
@@ -2473,7 +2512,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds a settings section with title and children
+  /// Builds a settings section container with title and list of options
   Widget _buildSettingsSection({
     required String title,
     required List<Widget> children,
@@ -2503,7 +2542,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds an individual settings tile
+  /// Builds an individual settings menu tile with icon, title, and optional trailing widget
   Widget _buildSettingsTile({
     required IconData icon,
     required String title,
@@ -2551,7 +2590,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Shows the About App dialog with detailed information
+  /// Shows the About App dialog with app info, features, and version
   void _showAboutDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -2665,6 +2704,7 @@ class _MyHomePageState extends State<MyHomePage> {
   String _formatTime(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour < 12 ? 'AM' : 'PM'}';
 
+  /// Formats DateTime as relative time (just now, 5m ago, 2h ago, 3/5)
   String _formatDate(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -2674,6 +2714,7 @@ class _MyHomePageState extends State<MyHomePage> {
     return '${dt.day}/${dt.month}';
   }
 
+  /// Capitalizes first letter of string for display
   String _capitalize(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 }
@@ -2682,6 +2723,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
 class _CornerBracketPainter extends CustomPainter {
   @override
+  /// Paints corner brackets at the four corners of the scan frame
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = Colors.white
@@ -2739,5 +2781,6 @@ class _CornerBracketPainter extends CustomPainter {
   }
 
   @override
+  /// Returns false since brackets don't change between repaints
   bool shouldRepaint(_CornerBracketPainter oldDelegate) => false;
 }
