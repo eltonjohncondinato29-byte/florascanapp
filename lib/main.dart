@@ -792,24 +792,28 @@ class _AuthPageState extends State<AuthPage> {
                     ),
                   ),
                   const SizedBox(height: 32),
+
                   // ==================== LOGIN / SIGNUP FIELDS ====================
                   _buildTextField(
                     hint: 'Email',
                     controller: _emailController,
                     keyboardType: TextInputType.emailAddress,
                   ),
+
                   // ==================== SIGNUP ONLY: USERNAME ====================
                   if (isSignup)
                     _buildTextField(
                       hint: 'Username',
                       controller: _usernameController,
                     ),
+
                   // ==================== PASSWORD FIELD ====================
                   _buildTextField(
                     hint: 'Password',
                     controller: _passwordController,
                     isPassword: true,
                   ),
+
                   // ==================== LOGIN ONLY: REMEMBER ME / FORGOT PASSWORD ====================
                   if (_isLogin)
                     Padding(
@@ -856,9 +860,11 @@ class _AuthPageState extends State<AuthPage> {
                         ],
                       ),
                     ),
+
                   // ==================== SIGNUP ONLY: PASSWORD STRENGTH ====================
                   if (isSignup)
                     _buildPasswordStrengthBar(_passwordController.text),
+
                   // ==================== AUTH ERROR MESSAGE ====================
                   if (_errorMessage != null) ...[
                     const SizedBox(height: 4),
@@ -874,6 +880,7 @@ class _AuthPageState extends State<AuthPage> {
                     const SizedBox(height: 8),
                   ] else
                     const SizedBox(height: 12),
+
                   // ==================== LOGIN / SIGNUP BUTTON ====================
                   SizedBox(
                     width: double.infinity,
@@ -908,6 +915,7 @@ class _AuthPageState extends State<AuthPage> {
                     ),
                   ),
                   const SizedBox(height: 18),
+
                   // ==================== SWITCH BETWEEN LOGIN AND SIGNUP ====================
                   if (_isLogin)
                     RichText(
@@ -1594,6 +1602,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   const SizedBox(height: 14),
+
                   // ── Recent Activity card (prototype: listed rows) ─────────
                   _dashCard(
                     child: Column(
@@ -1631,6 +1640,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   const SizedBox(height: 14),
+
                   // ── Device Status card (prototype style) ──────────────────
                   _dashCard(
                     child: Column(
