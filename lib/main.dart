@@ -78,6 +78,7 @@ class _FloraScanAppState extends State<FloraScanApp>
     with WidgetsBindingObserver {
   bool _authenticated = false;
   bool _authReady = false;
+  bool _isDarkMode = false;
   late AppLifecycleListener _lifecycleListener;
 
   @override
@@ -157,11 +158,27 @@ class _FloraScanAppState extends State<FloraScanApp>
         colorScheme: ColorScheme.fromSeed(seedColor: kGreenMid),
         useMaterial3: true,
         fontFamily: 'sans-serif',
+        brightness: Brightness.light,
       ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: kGreenMid,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+        fontFamily: 'sans-serif',
+        brightness: Brightness.dark,
+      ),
+      themeMode: _isDarkMode ? ThemeMode.dark : ThemeMode.light,
       home: !_authReady
           ? const _AuthLoadingScreen()
           : _authenticated
-          ? MyHomePage(title: 'FloraScan', onSignOut: _handleSignOut)
+          ? MyHomePage(
+              title: 'FloraScan',
+              onSignOut: _handleSignOut,
+              onThemeChanged: (isDark) => setState(() => _isDarkMode = isDark),
+              isDarkMode: _isDarkMode,
+            )
           : AuthPage(onSignedIn: _handleSignedIn),
     );
   }
@@ -1007,10 +1024,18 @@ class LeafScanReport {
 
 // ==================== HOME PAGE / MAIN APP TABS ====================
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title, required this.onSignOut});
+  const MyHomePage({
+    super.key,
+    required this.title,
+    required this.onSignOut,
+    required this.onThemeChanged,
+    required this.isDarkMode,
+  });
 
   final String title;
   final Future<void> Function() onSignOut;
+  final Function(bool) onThemeChanged;
+  final bool isDarkMode;
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
@@ -1433,22 +1458,11 @@ class _MyHomePageState extends State<MyHomePage> {
                       children: [
                         IconButton(
                           icon: const Icon(
-                            Icons.notifications_none_outlined,
-                            color: kTextMid,
-                            size: 22,
-                          ),
-                          onPressed: () {},
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                        const SizedBox(width: 12),
-                        IconButton(
-                          icon: const Icon(
                             Icons.settings_outlined,
                             color: kTextMid,
                             size: 22,
                           ),
-                          onPressed: () {},
+                          onPressed: () => _showSettingsBottomSheet(context),
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(),
                         ),
@@ -2278,6 +2292,371 @@ class _MyHomePageState extends State<MyHomePage> {
           ],
         ),
       ),
+    );
+  }
+
+  // ─── Settings Bottom Sheet ─────────────────────────────────────────────────
+
+  /// Shows the Settings bottom sheet with theme, notifications, and about app
+  void _showSettingsBottomSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.75,
+          minChildSize: 0.5,
+          maxChildSize: 0.95,
+          builder: (context, scrollController) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: kCardBg,
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(24),
+                  topRight: Radius.circular(24),
+                ),
+              ),
+              child: SingleChildScrollView(
+                controller: scrollController,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 24,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'Settings',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                              color: kTextDark,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: kTextMid,
+                              size: 24,
+                            ),
+                            onPressed: () => Navigator.pop(context),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+
+                      // ── Theme Section ────────────────────────────────────
+                      _buildSettingsSection(
+                        title: 'Theme & Display',
+                        children: [
+                          _buildSettingsTile(
+                            icon: Icons.dark_mode_outlined,
+                            title: 'Dark Mode',
+                            trailing: Transform.scale(
+                              scale: 0.8,
+                              child: Switch(
+                                value: widget.isDarkMode,
+                                onChanged: (value) {
+                                  widget.onThemeChanged(value);
+                                  Navigator.pop(context);
+                                },
+                                activeThumbColor: kGreenMid,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+
+                      // ── Notifications Section ────────────────────────────
+                      _buildSettingsSection(
+                        title: 'Notifications',
+                        children: [
+                          _buildSettingsTile(
+                            icon: Icons.notifications_outlined,
+                            title: 'Push Notifications',
+                            subtitle: 'Receive scan alerts and reminders',
+                            trailing: Transform.scale(
+                              scale: 0.8,
+                              child: Switch(
+                                value: true,
+                                onChanged: (value) {},
+                                activeThumbColor: kGreenMid,
+                              ),
+                            ),
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: Divider(height: 1),
+                          ),
+                          _buildSettingsTile(
+                            icon: Icons.email_outlined,
+                            title: 'Email Alerts',
+                            subtitle: 'Weekly scan summaries',
+                            trailing: Transform.scale(
+                              scale: 0.8,
+                              child: Switch(
+                                value: true,
+                                onChanged: (value) {},
+                                activeThumbColor: kGreenMid,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+
+                      // ── Data & Privacy Section ───────────────────────────
+                      _buildSettingsSection(
+                        title: 'Data & Privacy',
+                        children: [
+                          _buildSettingsTile(
+                            icon: Icons.info_outline,
+                            title: 'Data Storage',
+                            subtitle:
+                                'Your scans are encrypted and stored securely',
+                            onTap: () {},
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: Divider(height: 1),
+                          ),
+                          _buildSettingsTile(
+                            icon: Icons.privacy_tip_outlined,
+                            title: 'Privacy Policy',
+                            onTap: () {},
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+
+                      // ── About App Section ────────────────────────────────
+                      _buildSettingsSection(
+                        title: 'About',
+                        children: [
+                          _buildSettingsTile(
+                            icon: Icons.info_outlined,
+                            title: 'About FloraScan',
+                            onTap: () => _showAboutDialog(context),
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: Divider(height: 1),
+                          ),
+                          _buildSettingsTile(
+                            icon: Icons.bug_report_outlined,
+                            title: 'App Version',
+                            subtitle: 'v1.0.0',
+                            onTap: () {},
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Builds a settings section with title and children
+  Widget _buildSettingsSection({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: kGreenMid,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFEEEEEE), width: 1),
+          ),
+          child: Column(children: children),
+        ),
+      ],
+    );
+  }
+
+  /// Builds an individual settings tile
+  Widget _buildSettingsTile({
+    required IconData icon,
+    required String title,
+    String? subtitle,
+    Widget? trailing,
+    VoidCallback? onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap ?? () {},
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Icon(icon, color: kGreenMid, size: 20),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: kTextDark,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(fontSize: 12, color: kTextLight),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[trailing],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Shows the About App dialog with detailed information
+  void _showAboutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text(
+            'About FloraScan',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              color: kTextDark,
+            ),
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: kGreenPale,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Image.asset(
+                      'assets/images/FloraScan - Logo.png',
+                      fit: BoxFit.contain,
+                      errorBuilder: (c, e, s) =>
+                          const Icon(Icons.eco, color: kGreenMid, size: 40),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'FloraScan',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: kTextDark,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Version 1.0.0',
+                  style: TextStyle(fontSize: 12, color: kTextLight),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'About',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: kTextDark,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'FloraScan is an advanced plant health monitoring application that uses Bluetooth connectivity to analyze leaf chlorophyll content and provide real-time health assessments for your plants.',
+                  style: TextStyle(fontSize: 13, color: kTextMid, height: 1.5),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Features',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: kTextDark,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ...[
+                  '📊 Real-time chlorophyll analysis',
+                  '📱 Bluetooth device connectivity',
+                  '💾 Cloud data storage with Supabase',
+                  '🔒 Secure user authentication',
+                  '📈 Detailed scan reports and history',
+                  '🌙 Light and Dark mode support',
+                ].map(
+                  (feature) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      feature,
+                      style: const TextStyle(fontSize: 13, color: kTextMid),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  '© 2026 FloraScan. All rights reserved.',
+                  style: TextStyle(fontSize: 11, color: kTextLight),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close', style: TextStyle(color: kGreenMid)),
+            ),
+          ],
+        );
+      },
     );
   }
 
