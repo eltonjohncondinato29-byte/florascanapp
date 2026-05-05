@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -137,19 +138,12 @@ class _FloraScanAppState extends State<FloraScanApp>
   void _handleSignedIn() => setState(() => _authenticated = true);
 
   Future<void> _initializeAuthState() async {
-    final hasSavedPreference = await appSecureStorage.containsKey(
-      key: _rememberMeKey,
-    );
-    final shouldRemember = await _readSecureBool(_rememberMeKey);
-    final hasSession = supabase.auth.currentUser != null;
-
-    if (hasSession && hasSavedPreference && !shouldRemember) {
-      await supabase.auth.signOut();
-    }
+    // Always sign out on app start to show login screen
+    await supabase.auth.signOut();
 
     if (!mounted) return;
     setState(() {
-      _authenticated = supabase.auth.currentUser != null;
+      _authenticated = false;
       _authReady = true;
     });
   }
@@ -983,6 +977,30 @@ class LeafScanReport {
   final int chlorophyllValue;
   final String status;
   final String fertilizer;
+
+  // Convert to JSON for storage
+  Map<String, dynamic> toJson() => {
+    'leafName': leafName,
+    'timestamp': timestamp.toIso8601String(),
+    'lengthCm': lengthCm,
+    'widthCm': widthCm,
+    'areaCm2': areaCm2,
+    'chlorophyllValue': chlorophyllValue,
+    'status': status,
+    'fertilizer': fertilizer,
+  };
+
+  // Create from JSON
+  factory LeafScanReport.fromJson(Map<String, dynamic> json) => LeafScanReport(
+    leafName: json['leafName'] as String,
+    timestamp: DateTime.parse(json['timestamp'] as String),
+    lengthCm: (json['lengthCm'] as num).toDouble(),
+    widthCm: (json['widthCm'] as num).toDouble(),
+    areaCm2: (json['areaCm2'] as num).toDouble(),
+    chlorophyllValue: json['chlorophyllValue'] as int,
+    status: json['status'] as String,
+    fertilizer: json['fertilizer'] as String,
+  );
 }
 
 // ─── Main Home ────────────────────────────────────────────────────────────────
@@ -1014,12 +1032,54 @@ class _MyHomePageState extends State<MyHomePage> {
   StreamSubscription<List<ScanResult>>? _scanSubscription;
 
   @override
+  void initState() {
+    super.initState();
+    _loadReports();
+  }
+
+  @override
   void dispose() {
     _scanSubscription?.cancel();
     _leafNameController.dispose();
     _lengthController.dispose();
     _widthController.dispose();
+    _saveReports(); // Save reports before disposing
     super.dispose();
+  }
+
+  // Get user-specific storage key
+  String _getUserReportsKey() {
+    final userId = supabase.auth.currentUser?.id ?? 'unknown';
+    return 'leaf_scan_reports_$userId';
+  }
+
+  // Save reports to secure storage (user-specific)
+  Future<void> _saveReports() async {
+    final jsonList = _reports.map((r) => r.toJson()).toList();
+    final jsonString = jsonEncode(jsonList);
+    await appSecureStorage.write(key: _getUserReportsKey(), value: jsonString);
+  }
+
+  // Load reports from secure storage (user-specific)
+  Future<void> _loadReports() async {
+    try {
+      final jsonString = await appSecureStorage.read(key: _getUserReportsKey());
+      if (jsonString != null && jsonString.isNotEmpty) {
+        final jsonList = jsonDecode(jsonString) as List<dynamic>;
+        if (mounted) {
+          setState(() {
+            _reports.clear();
+            _reports.addAll(
+              jsonList.map(
+                (json) => LeafScanReport.fromJson(json as Map<String, dynamic>),
+              ),
+            );
+          });
+        }
+      }
+    } catch (e) {
+      // Silently handle error loading reports
+    }
   }
 
   Future<void> _startScan() async {
@@ -1165,7 +1225,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
 
     try {
-      await supabase.from('florascan.leaf_scans').insert({
+      await supabase.schema('florascan').from('leaf_scans').insert({
         'leaf_classification': name,
         'leaf_size_cm2': areaCm2,
         'chlorophyll_content': chlorophyll,
@@ -1184,6 +1244,7 @@ class _MyHomePageState extends State<MyHomePage> {
         _chlorophyllValue = null;
         _connectionStatus = 'Saved to Cloud!';
       });
+      await _saveReports(); // Save to local storage
     } catch (e) {
       setState(() => _connectionStatus = 'Database Error: $e');
     }
