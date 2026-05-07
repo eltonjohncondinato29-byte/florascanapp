@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 // Global reference for Supabase
@@ -1077,6 +1079,11 @@ class _MyHomePageState extends State<MyHomePage> {
   final _widthController = TextEditingController();
   final Map<DeviceIdentifier, BluetoothDevice> _foundDevices = {};
 
+  // Camera-related variables
+  CameraController? _cameraController;
+  bool _isCameraInitialized = false;
+  bool _isCameraActive = false;
+
   int _selectedIndex = 0;
   bool _isScanning = false;
   bool _isConnected = false;
@@ -1090,6 +1097,7 @@ class _MyHomePageState extends State<MyHomePage> {
   void initState() {
     super.initState();
     _loadReports();
+    _initializeCamera();
   }
 
   @override
@@ -1098,6 +1106,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _leafNameController.dispose();
     _lengthController.dispose();
     _widthController.dispose();
+    _cameraController?.dispose();
     _saveReports(); // Save reports before disposing
     super.dispose();
   }
@@ -1214,36 +1223,172 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  /// Reads chlorophyll value from connected device or simulates data
+  /// Reads chlorophyll value from connected device, camera scan, or simulates data
   Future<void> _readChlorophyllValue() async {
-    if (_isConnected && _chlorophyllCharacteristic != null) {
-      try {
-        final data = await _chlorophyllCharacteristic!.read();
-        final value = _parseChlorophyllData(data);
-        setState(() {
-          _chlorophyllValue = value;
-          _connectionStatus = 'Chlorophyll value received: $value';
-        });
-        return;
-      } catch (error) {
-        setState(
-          () => _connectionStatus = 'Failed to read sensor data: $error',
+    // First, try to open the camera for leaf scanning
+    await _openCameraToScanLeaf();
+  }
+
+  /// Initializes the camera for leaf scanning
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isNotEmpty && mounted) {
+        final camera = cameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.back,
+          orElse: () => cameras.first,
         );
+        await _setupCamera(camera);
       }
+    } catch (e) {
+      debugPrint('Error initializing camera: $e');
+    }
+  }
+
+  /// Sets up the camera controller
+  Future<void> _setupCamera(CameraDescription camera) async {
+    try {
+      final oldController = _cameraController;
+      _cameraController = CameraController(
+        camera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+      await oldController?.dispose();
+
+      await _cameraController!.initialize();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = false;
+          _isCameraActive = false;
+        });
+      }
+      debugPrint('Error setting up camera: $e');
+    }
+  }
+
+  /// Opens camera to scan the leaf
+  Future<void> _openCameraToScanLeaf() async {
+    if (_isCameraActive &&
+        _isCameraInitialized &&
+        _cameraController?.value.isInitialized == true) {
+      return;
     }
 
-    final simulatedValue = 20 + Random().nextInt(61);
+    final currentStatus = await Permission.camera.status;
+    final cameraStatus = currentStatus.isGranted
+        ? currentStatus
+        : await Permission.camera.request();
+
+    if (!cameraStatus.isGranted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Camera permission is required to scan leaves'),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!_isCameraInitialized ||
+        _cameraController == null ||
+        !_cameraController!.value.isInitialized) {
+      await _initializeCamera();
+    }
+
+    if (!mounted) return;
+
+    if (!_isCameraInitialized ||
+        _cameraController == null ||
+        !_cameraController!.value.isInitialized) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Camera is not ready')));
+      }
+      return;
+    }
+
+    // Start the camera preview
     setState(() {
-      _chlorophyllValue = simulatedValue;
-      _connectionStatus = 'Simulated chlorophyll data: $simulatedValue';
+      _isCameraActive = true;
     });
   }
 
-  /// Parses raw Bluetooth data into chlorophyll index value
+  /// Stops the camera preview
+  void _stopCamera() {
+    if (!_isCameraActive || !mounted) return;
+    setState(() {
+      _isCameraActive = false;
+    });
+  }
+
+  /// Captures an image from the camera for leaf analysis
+  Future<void> _captureLeafImage() async {
+    try {
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized) {
+        return;
+      }
+
+      await _cameraController!.takePicture();
+      final chlorophyll = await _readSensorOrSimulatedChlorophyll();
+
+      // Simulate analysis from the captured image
+      setState(() {
+        _chlorophyllValue = chlorophyll;
+        _connectionStatus =
+            'Leaf scanned successfully! Chlorophyll: $_chlorophyllValue';
+        _isCameraActive = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Leaf scanned! Chlorophyll value: $_chlorophyllValue',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error capturing image: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error capturing image: $e')));
+      }
+    }
+  }
+
+  Future<int> _readSensorOrSimulatedChlorophyll() async {
+    if (_isConnected && _chlorophyllCharacteristic != null) {
+      try {
+        final data = await _chlorophyllCharacteristic!.read();
+        return _parseChlorophyllData(data);
+      } catch (error) {
+        if (mounted) {
+          setState(
+            () => _connectionStatus = 'Failed to read sensor data: $error',
+          );
+        }
+      }
+    }
+
+    return 20 + Random().nextInt(61);
+  }
+
   int _parseChlorophyllData(List<int> data) {
     if (data.isEmpty) return 0;
     if (data.length == 1) return data.first.clamp(0, 100);
-    final combined = data[0] | (data.length > 1 ? data[1] << 8 : 0);
+    final combined = data[0] | (data[1] << 8);
     return combined.clamp(0, 100);
   }
 
@@ -1316,7 +1461,16 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   /// Updates selected tab index to switch between different app screens
-  void _selectTab(int index) => setState(() => _selectedIndex = index);
+  void _selectTab(int index) {
+    setState(() => _selectedIndex = index);
+    if (index == 2) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_openCameraToScanLeaf());
+      });
+    } else {
+      _stopCamera();
+    }
+  }
 
   // ─── Bottom Nav ──────────────────────────────────────────────────────────
 
@@ -1533,72 +1687,75 @@ class _MyHomePageState extends State<MyHomePage> {
               child: Column(
                 children: [
                   // ── Current Scan card (prototype style) ──────────────────
-                  _dashCard(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        // Left: label + big number + subtitle + timestamp
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Current Scan',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: kTextDark,
+                  GestureDetector(
+                    onTap: () => _selectTab(2),
+                    child: _dashCard(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          // Left: label + big number + subtitle + timestamp
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Current Scan',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: kTextDark,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                latestReport != null
-                                    ? '${latestReport.chlorophyllValue}'
-                                    : '--',
-                                style: const TextStyle(
-                                  fontSize: 52,
-                                  fontWeight: FontWeight.w800,
-                                  color: kTextDark,
-                                  height: 1.0,
+                                const SizedBox(height: 8),
+                                Text(
+                                  latestReport != null
+                                      ? '${latestReport.chlorophyllValue}'
+                                      : '--',
+                                  style: const TextStyle(
+                                    fontSize: 52,
+                                    fontWeight: FontWeight.w800,
+                                    color: kTextDark,
+                                    height: 1.0,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 2),
-                              const Text(
-                                'Chl Index',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: kTextMid,
-                                  fontWeight: FontWeight.w500,
+                                const SizedBox(height: 2),
+                                const Text(
+                                  'Chl Index',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: kTextMid,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                latestReport != null
-                                    ? 'Last Updated ${_formatDate(latestReport.timestamp)}'
-                                    : 'No scan yet',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: kTextLight,
+                                const SizedBox(height: 6),
+                                Text(
+                                  latestReport != null
+                                      ? 'Last Updated ${_formatDate(latestReport.timestamp)}'
+                                      : 'No scan yet',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: kTextLight,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        // Right: device icon box
-                        Container(
-                          width: 56,
-                          height: 72,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF0F0F0),
-                            borderRadius: BorderRadius.circular(10),
+                          // Right: device icon box
+                          Container(
+                            width: 56,
+                            height: 72,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF0F0F0),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(
+                              Icons.devices_other,
+                              color: kTextMid,
+                              size: 30,
+                            ),
                           ),
-                          child: const Icon(
-                            Icons.devices_other,
-                            color: kTextMid,
-                            size: 30,
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                   const SizedBox(height: 14),
@@ -1892,36 +2049,7 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
           const SizedBox(height: 16),
-          // "Camera" frame
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Stack(
-                  children: [
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF3A6B42),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: const Center(
-                        child: Icon(
-                          Icons.eco,
-                          size: 80,
-                          color: Color(0x55FFFFFF),
-                        ),
-                      ),
-                    ),
-                    Positioned.fill(
-                      child: CustomPaint(painter: _CornerBracketPainter()),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+          Flexible(child: _buildScannerFrame()),
           const SizedBox(height: 20),
           // Scan fields
           Padding(
@@ -2043,7 +2171,9 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(width: 10),
                 GestureDetector(
-                  onTap: _readChlorophyllValue,
+                  onTap: _isCameraActive
+                      ? _captureLeafImage
+                      : _readChlorophyllValue,
                   child: Container(
                     width: 54,
                     height: 54,
@@ -2093,6 +2223,70 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildScannerFrame() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availableWidth = max(0.0, constraints.maxWidth - 40);
+        final frameWidth = min(432.0, availableWidth);
+        final frameHeight = min(
+          315.0,
+          min(frameWidth / 1.38, constraints.maxHeight),
+        );
+        final hasLiveCamera =
+            _isCameraActive &&
+            _isCameraInitialized &&
+            _cameraController?.value.isInitialized == true;
+
+        return Center(
+          child: SizedBox(
+            width: frameWidth,
+            height: frameHeight,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (hasLiveCamera)
+                    _buildCameraPreview()
+                  else
+                    Container(
+                      color: const Color(0xFF3A6F43),
+                      child: const Center(
+                        child: Icon(
+                          Icons.eco,
+                          size: 78,
+                          color: Color(0x55FFFFFF),
+                        ),
+                      ),
+                    ),
+                  CustomPaint(painter: _CornerBracketPainter()),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCameraPreview() {
+    final controller = _cameraController;
+    final previewSize = controller?.value.previewSize;
+
+    if (controller == null || previewSize == null) {
+      return const ColoredBox(color: Color(0xFF3A6F43));
+    }
+
+    return FittedBox(
+      fit: BoxFit.cover,
+      child: SizedBox(
+        width: previewSize.height,
+        height: previewSize.width,
+        child: CameraPreview(controller),
       ),
     );
   }
