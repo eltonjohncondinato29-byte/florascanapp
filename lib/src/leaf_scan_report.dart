@@ -18,7 +18,7 @@ class LeafScanReport {
   final double lengthCm;
   final double widthCm;
   final double areaCm2;
-  final int chlorophyllValue;
+  final int? chlorophyllValue;
   final String status;
   final String fertilizer;
 
@@ -43,9 +43,11 @@ class LeafScanReport {
     lengthCm: (json['lengthCm'] as num).toDouble(),
     widthCm: (json['widthCm'] as num).toDouble(),
     areaCm2: (json['areaCm2'] as num).toDouble(),
-    chlorophyllValue: json['chlorophyllValue'] as int,
-    status: json['status'] as String,
-    fertilizer: json['fertilizer'] as String,
+    chlorophyllValue: (json['chlorophyllValue'] as num?)?.toInt(),
+    status: json['status'] as String? ?? 'Leaf scanned',
+    fertilizer:
+        json['fertilizer'] as String? ??
+        'Chlorophyll sensor not connected yet.',
   );
 }
 

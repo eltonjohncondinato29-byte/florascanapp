@@ -35,13 +35,14 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _isConnected = false;
   String _connectionStatus = 'Disconnected';
   int? _chlorophyllValue;
-  BluetoothCharacteristic? _chlorophyllCharacteristic;
   final List<LeafScanReport> _reports = [];
   StreamSubscription<List<ScanResult>>? _scanSubscription;
 
   // Leaf identification and analysis variables
   bool _isAnalyzing = false;
   bool _fieldsLocked = false;
+  String? _capturedImagePath;
+  Map<String, _LeafImageProfile>? _leafReferenceProfiles;
 
   @override
   void initState() {
@@ -132,7 +133,7 @@ class _MyHomePageState extends State<MyHomePage> {
       setState(() {
         _isScanning = false;
         if (_foundDevices.isEmpty) {
-          _connectionStatus = 'No compatible leaf meter found. Try again.';
+          _connectionStatus = 'No Chlorophyll meter found. Please try again.';
         }
       });
     }
@@ -161,7 +162,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
       setState(() {
         _isConnected = true;
-        _chlorophyllCharacteristic = readableCharacteristic;
         _connectionStatus =
             'Connected to ${device.platformName.isNotEmpty ? device.platformName : device.remoteId}';
       });
@@ -171,12 +171,6 @@ class _MyHomePageState extends State<MyHomePage> {
         _connectionStatus = 'Device connection failed: $error';
       });
     }
-  }
-
-  /// Reads chlorophyll value from connected device, camera scan, or simulates data
-  Future<void> _readChlorophyllValue() async {
-    // First, try to open the camera for leaf scanning
-    await _openCameraToScanLeaf();
   }
 
   /// Initializes the camera for leaf scanning
@@ -269,6 +263,9 @@ class _MyHomePageState extends State<MyHomePage> {
     // Start the camera preview
     setState(() {
       _isCameraActive = true;
+      _isAnalyzing = false;
+      _capturedImagePath = null;
+      _connectionStatus = 'Position a leaf in frame.';
     });
   }
 
@@ -282,6 +279,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
   /// Captures an image from the camera for leaf analysis
   Future<void> _captureLeafImage() async {
+    if (_isAnalyzing) return;
+
     try {
       if (_cameraController == null ||
           !_cameraController!.value.isInitialized) {
@@ -295,54 +294,65 @@ class _MyHomePageState extends State<MyHomePage> {
       if (!mounted) return;
       setState(() {
         _isAnalyzing = true;
+        _capturedImagePath = capturedImage.path;
+        _leafNameController.clear();
+        _lengthController.clear();
+        _widthController.clear();
+        _chlorophyllValue = null;
+        _fieldsLocked = false;
         _connectionStatus = 'Analyzing leaf...';
       });
 
       // Identify the leaf type
-      final leafType = await _identifyLeafType(capturedImage.path);
+      final analysis = await _analyzeLeafImage(capturedImage.path);
 
-      if (leafType == null) {
+      if (analysis == null) {
         if (mounted) {
           setState(() {
             _isAnalyzing = false;
             _connectionStatus =
                 'Not a Cucumber or Robusta Coffee leaf. Try again.';
             _fieldsLocked = false;
+            _chlorophyllValue = null;
+            _leafNameController.clear();
+            _lengthController.clear();
+            _widthController.clear();
+            _isCameraActive = false;
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
                 '⚠️  Not a Cucumber or Robusta Coffee leaf. Please scan a valid leaf.',
               ),
-              backgroundColor: Colors.orange,
+              backgroundColor: ui.Color.fromARGB(1, 255, 95, 95),
             ),
           );
         }
         return;
       }
 
-      // Generate measurements for the identified leaf
-      final measurements = _generateLeafMeasurements(leafType);
-      final chlorophyll = await _readSensorOrSimulatedChlorophyll();
-
+      final leafType = analysis.leafType;
+      final measurements = {
+        'length': analysis.lengthCm,
+        'width': analysis.widthCm,
+      };
       // Auto-populate fields with scan results
       if (mounted) {
         setState(() {
-          _leafNameController.text = leafType;
-          _lengthController.text = measurements['length']!.toString();
-          _widthController.text = measurements['width']!.toString();
-          _chlorophyllValue = chlorophyll;
+          _leafNameController.text = analysis.leafType;
+          _lengthController.text = analysis.lengthCm.toStringAsFixed(1);
+          _widthController.text = analysis.widthCm.toStringAsFixed(1);
+          _chlorophyllValue = null;
           _fieldsLocked = true;
           _isAnalyzing = false;
-          _connectionStatus =
-              'Leaf scanned successfully! Chlorophyll: $_chlorophyllValue';
+          _connectionStatus = 'Leaf scanned successfully.';
           _isCameraActive = false;
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '✓ $leafType scanned! L: ${measurements['length']}cm, W: ${measurements['width']}cm',
+              '$leafType scanned. L: ${measurements['length']}cm, W: ${measurements['width']}cm',
             ),
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 3),
@@ -362,37 +372,13 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  Future<int> _readSensorOrSimulatedChlorophyll() async {
-    if (_isConnected && _chlorophyllCharacteristic != null) {
-      try {
-        final data = await _chlorophyllCharacteristic!.read();
-        return _parseChlorophyllData(data);
-      } catch (error) {
-        if (mounted) {
-          setState(
-            () => _connectionStatus = 'Failed to read sensor data: $error',
-          );
-        }
-      }
-    }
-
-    return 20 + Random().nextInt(61);
-  }
-
-  int _parseChlorophyllData(List<int> data) {
-    if (data.isEmpty) return 0;
-    if (data.length == 1) return data.first.clamp(0, 100);
-    final combined = data[0] | (data[1] << 8);
-    return combined.clamp(0, 100);
-  }
-
   /// Generates fertilizer recommendation based on chlorophyll level
   String _fertilizerRecommendation(int value) {
-    if (value >= 55) return 'Healthy leaf � no extra fertilizer required.';
+    if (value >= 55) return 'Healthy leaf - no extra fertilizer required.';
     if (value >= 40) {
-      return 'Moderate chlorophyll � use balanced NPK fertilizer.';
+      return 'Moderate chlorophyll - use balanced NPK fertilizer.';
     }
-    return 'Low chlorophyll � apply nitrogen-rich fertilizer.';
+    return 'Low chlorophyll - apply nitrogen-rich fertilizer.';
   }
 
   /// Determines leaf health status (Healthy/Mild stress/Needs attention) based on chlorophyll
@@ -402,65 +388,251 @@ class _MyHomePageState extends State<MyHomePage> {
     return 'Needs attention';
   }
 
-  /// Identifies leaf type from captured image by analyzing color patterns
-  Future<String?> _identifyLeafType(String imagePath) async {
+  /// Analyzes the captured frame and accepts only the two supported leaf types.
+  Future<_LeafScanAnalysis?> _analyzeLeafImage(String imagePath) async {
     try {
       if (imagePath.isEmpty) return null;
 
-      // Simulate leaf identification by checking image color patterns
-      // In a production app, this would use ML Kit or a custom ML model
+      final capturedProfile = await _createLeafProfileFromFile(imagePath);
+      await Future<void>.delayed(const Duration(milliseconds: 650));
 
-      // For this implementation, we use a random selection between the two leaf types
-      // In production, you would:
-      // 1. Load the image from imagePath using InputImage.fromFilePath()
-      // 2. Use Google ML Kit's Image Labeling or custom model
-      // 3. Compare with reference images in assets/images
-      // 4. Return the identified leaf type
-
-      // Simulated identification logic
-      final random = Random().nextInt(100);
-
-      if (random < 45) {
-        return 'Cucumber Leaf';
-      } else if (random < 90) {
-        return 'Robusta Coffee Leaf';
+      if (!capturedProfile.hasLeafCandidate) {
+        return null;
       }
 
-      return null; // Not recognized as either leaf type
+      final references = await _loadLeafReferenceProfiles();
+      final scores =
+          references.entries
+              .map(
+                (entry) => MapEntry(
+                  entry.key,
+                  _leafProfileDistance(capturedProfile, entry.value),
+                ),
+              )
+              .toList()
+            ..sort((a, b) => a.value.compareTo(b.value));
+
+      final bestMatch = scores.first;
+      if (bestMatch.value > 0.48) {
+        return null;
+      }
+
+      final measurements = _estimateLeafMeasurements(
+        bestMatch.key,
+        capturedProfile,
+      );
+
+      return _LeafScanAnalysis(
+        leafType: bestMatch.key,
+        lengthCm: measurements['length']!,
+        widthCm: measurements['width']!,
+      );
     } catch (e) {
-      debugPrint('Error identifying leaf: $e');
+      debugPrint('Error analyzing leaf: $e');
       return null;
     }
   }
 
-  /// Generates realistic measurements based on identified leaf type
-  Map<String, double> _generateLeafMeasurements(String leafType) {
-    final random = Random();
+  Future<Map<String, _LeafImageProfile>> _loadLeafReferenceProfiles() async {
+    final cached = _leafReferenceProfiles;
+    if (cached != null) return cached;
 
-    double length;
-    double width;
+    final references = <String, String>{
+      'Cucumber Leaf': 'assets/images/Cucumber Leaf.png',
+      'Robusta Coffee Leaf': 'assets/images/Robusta Coffee Leaf.png',
+    };
+
+    final profiles = <String, _LeafImageProfile>{};
+    for (final entry in references.entries) {
+      final bytes = await rootBundle.load(entry.value);
+      profiles[entry.key] = await _createLeafProfile(
+        bytes.buffer.asUint8List(),
+      );
+    }
+
+    _leafReferenceProfiles = profiles;
+    return profiles;
+  }
+
+  Future<_LeafImageProfile> _createLeafProfileFromFile(String imagePath) async {
+    return _createLeafProfile(await File(imagePath).readAsBytes());
+  }
+
+  Future<_LeafImageProfile> _createLeafProfile(List<int> imageBytes) async {
+    final codec = await ui.instantiateImageCodec(
+      Uint8List.fromList(imageBytes),
+      targetWidth: 180,
+    );
+    final frame = await codec.getNextFrame();
+    final image = frame.image;
+    final pixelData = await image.toByteData(
+      format: ui.ImageByteFormat.rawRgba,
+    );
+    if (pixelData == null) return _LeafImageProfile.empty();
+
+    final width = image.width;
+    final height = image.height;
+    final bytes = pixelData.buffer.asUint8List();
+    final hueBins = List<double>.filled(12, 0);
+
+    var leafPixels = 0;
+    var minX = width;
+    var minY = height;
+    var maxX = 0;
+    var maxY = 0;
+    var hueTotal = 0.0;
+    var saturationTotal = 0.0;
+    var valueTotal = 0.0;
+
+    for (var y = 0; y < height; y++) {
+      for (var x = 0; x < width; x++) {
+        final index = (y * width + x) * 4;
+        final r = bytes[index];
+        final g = bytes[index + 1];
+        final b = bytes[index + 2];
+        final hsv = _rgbToHsv(r, g, b);
+        final hue = hsv[0];
+        final saturation = hsv[1];
+        final value = hsv[2];
+
+        final isGreenLeafPixel =
+            hue >= 50 &&
+            hue <= 175 &&
+            saturation >= 0.16 &&
+            value >= 0.10 &&
+            g >= r * 0.88 &&
+            g >= b * 0.70;
+
+        if (!isGreenLeafPixel) continue;
+
+        leafPixels++;
+        minX = min(minX, x);
+        minY = min(minY, y);
+        maxX = max(maxX, x);
+        maxY = max(maxY, y);
+        hueTotal += hue;
+        saturationTotal += saturation;
+        valueTotal += value;
+
+        final bin = (((hue - 50) / 125) * hueBins.length)
+            .floor()
+            .clamp(0, hueBins.length - 1)
+            .toInt();
+        hueBins[bin] += 1;
+      }
+    }
+
+    if (leafPixels == 0) return _LeafImageProfile.empty();
+
+    final bboxWidth = maxX - minX + 1;
+    final bboxHeight = maxY - minY + 1;
+    final bboxArea = bboxWidth * bboxHeight;
+    final totalPixels = width * height;
+    final longSide = max(bboxWidth, bboxHeight).toDouble();
+    final shortSide = max(1, min(bboxWidth, bboxHeight)).toDouble();
+
+    for (var i = 0; i < hueBins.length; i++) {
+      hueBins[i] = hueBins[i] / leafPixels;
+    }
+
+    return _LeafImageProfile(
+      leafPixelCount: leafPixels,
+      greenCoverage: leafPixels / totalPixels,
+      bboxCoverage: bboxArea / totalPixels,
+      fillRatio: leafPixels / bboxArea,
+      longToShortRatio: longSide / shortSide,
+      meanHue: hueTotal / leafPixels,
+      meanSaturation: saturationTotal / leafPixels,
+      meanValue: valueTotal / leafPixels,
+      hueHistogram: hueBins,
+    );
+  }
+
+  List<double> _rgbToHsv(int red, int green, int blue) {
+    final r = red / 255.0;
+    final g = green / 255.0;
+    final b = blue / 255.0;
+    final maxValue = max(r, max(g, b));
+    final minValue = min(r, min(g, b));
+    final delta = maxValue - minValue;
+
+    var hue = 0.0;
+    if (delta != 0) {
+      if (maxValue == r) {
+        hue = 60 * (((g - b) / delta) % 6);
+      } else if (maxValue == g) {
+        hue = 60 * (((b - r) / delta) + 2);
+      } else {
+        hue = 60 * (((r - g) / delta) + 4);
+      }
+    }
+    if (hue < 0) hue += 360;
+
+    final saturation = maxValue == 0 ? 0.0 : delta / maxValue;
+    return [hue, saturation, maxValue];
+  }
+
+  double _leafProfileDistance(
+    _LeafImageProfile captured,
+    _LeafImageProfile reference,
+  ) {
+    var histogramDistance = 0.0;
+    for (var i = 0; i < captured.hueHistogram.length; i++) {
+      histogramDistance +=
+          (captured.hueHistogram[i] - reference.hueHistogram[i]).abs();
+    }
+    histogramDistance = (histogramDistance / 2).clamp(0.0, 1.0).toDouble();
+
+    final ratioDistance =
+        (log(captured.longToShortRatio / reference.longToShortRatio).abs() /
+                log(4))
+            .clamp(0.0, 1.0)
+            .toDouble();
+
+    return (captured.meanHue - reference.meanHue).abs() / 125 * 0.20 +
+        (captured.meanSaturation - reference.meanSaturation).abs() * 0.18 +
+        (captured.meanValue - reference.meanValue).abs() * 0.14 +
+        ratioDistance * 0.24 +
+        (captured.fillRatio - reference.fillRatio).abs() * 0.12 +
+        (captured.greenCoverage - reference.greenCoverage).abs() * 0.04 +
+        histogramDistance * 0.08;
+  }
+
+  Map<String, double> _estimateLeafMeasurements(
+    String leafType,
+    _LeafImageProfile profile,
+  ) {
+    final sizeSignal = ((profile.bboxCoverage - 0.05) / 0.45)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final ratioSignal = ((profile.longToShortRatio - 1.0) / 2.8)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final signal = (sizeSignal * 0.45 + ratioSignal * 0.55)
+        .clamp(0.0, 1.0)
+        .toDouble();
+
+    late double length;
+    late double width;
 
     switch (leafType) {
       case 'Cucumber Leaf':
-        // Cucumber leaves typically: 4-7 cm length, 3-5 cm width
-        length = 4.5 + random.nextDouble() * 2.5;
-        width = 3.0 + random.nextDouble() * 2.0;
+        length = 4.5 + signal * 2.5;
+        width = (length / profile.longToShortRatio).clamp(3.0, 5.6).toDouble();
         break;
       case 'Robusta Coffee Leaf':
-        // Robusta coffee leaves typically: 8-15 cm length, 4-8 cm width
-        length = 8.0 + random.nextDouble() * 7.0;
-        width = 4.0 + random.nextDouble() * 4.0;
+        length = 8.0 + signal * 7.0;
+        width = (length / profile.longToShortRatio).clamp(4.0, 8.0).toDouble();
         break;
       default:
-        length = 5.0 + random.nextDouble() * 5.0;
-        width = 2.5 + random.nextDouble() * 3.5;
+        length = 0;
+        width = 0;
     }
 
-    // Round to 1 decimal place
-    length = double.parse(length.toStringAsFixed(1));
-    width = double.parse(width.toStringAsFixed(1));
-
-    return {'length': length, 'width': width};
+    return {
+      'length': double.parse(length.toStringAsFixed(1)),
+      'width': double.parse(width.toStringAsFixed(1)),
+    };
   }
 
   /// Saves current scan report to local storage and cloud database
@@ -470,10 +642,10 @@ class _MyHomePageState extends State<MyHomePage> {
     final widthCm = double.tryParse(_widthController.text) ?? 0;
     final chlorophyll = _chlorophyllValue;
 
-    if (name.isEmpty || lengthCm <= 0 || widthCm <= 0 || chlorophyll == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Please fill all fields.')));
+    if (name.isEmpty || lengthCm <= 0 || widthCm <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please scan a supported leaf first.')),
+      );
       return;
     }
 
@@ -485,21 +657,32 @@ class _MyHomePageState extends State<MyHomePage> {
       widthCm: widthCm,
       areaCm2: areaCm2,
       chlorophyllValue: chlorophyll,
-      status: _leafHealthStatus(chlorophyll),
-      fertilizer: _fertilizerRecommendation(chlorophyll),
+      status: chlorophyll == null
+          ? 'Leaf scanned'
+          : _leafHealthStatus(chlorophyll),
+      fertilizer: chlorophyll == null
+          ? 'Chlorophyll sensor not connected yet.'
+          : _fertilizerRecommendation(chlorophyll),
     );
 
     try {
-      await supabase.schema('florascan').from('leaf_scans').insert({
+      final scanData = <String, dynamic>{
         'leaf_classification': name,
         'leaf_size_cm2': areaCm2,
-        'chlorophyll_content': chlorophyll,
-        'raw_red_signal': 0,
-        'raw_nir_signal': 0,
         'user_id':
             supabase.auth.currentUser?.id ??
             '00000000-0000-0000-0000-000000000000',
-      });
+      };
+
+      if (chlorophyll != null) {
+        scanData.addAll({
+          'chlorophyll_content': chlorophyll,
+          'raw_red_signal': 0,
+          'raw_nir_signal': 0,
+        });
+      }
+
+      await supabase.schema('florascan').from('leaf_scans').insert(scanData);
 
       setState(() {
         _reports.insert(0, report);
@@ -508,7 +691,7 @@ class _MyHomePageState extends State<MyHomePage> {
         _widthController.clear();
         _chlorophyllValue = null;
         _fieldsLocked = false;
-        _connectionStatus = 'Saved to Cloud! Ready for next scan.';
+        _connectionStatus = 'Saved!.';
       });
       await _saveReports(); // Save to local storage
     } catch (e) {
@@ -647,6 +830,7 @@ class _MyHomePageState extends State<MyHomePage> {
         user?.email?.split('@').first ??
         'Researcher';
     final latestReport = _reports.isNotEmpty ? _reports.first : null;
+    final latestChlorophyll = latestReport?.chlorophyllValue;
     final recentReports = _reports.take(3).toList();
 
     return SafeArea(
@@ -764,8 +948,8 @@ class _MyHomePageState extends State<MyHomePage> {
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
-                                  latestReport != null
-                                      ? '${latestReport.chlorophyllValue}'
+                                  latestChlorophyll != null
+                                      ? '$latestChlorophyll'
                                       : '--',
                                   style: const TextStyle(
                                     fontSize: 52,
@@ -840,7 +1024,7 @@ class _MyHomePageState extends State<MyHomePage> {
                             (r) => Padding(
                               padding: const EdgeInsets.only(bottom: 5.0),
                               child: Text(
-                                '${r.leafName}  |  ${_formatDate(r.timestamp)}  |  Chl Index: ${r.chlorophyllValue}',
+                                '${r.leafName}  |  ${_formatDate(r.timestamp)}  |  Chl Index: ${_chlorophyllLabel(r)}',
                                 style: const TextStyle(
                                   fontSize: 12,
                                   color: kTextMid,
@@ -1028,7 +1212,14 @@ class _MyHomePageState extends State<MyHomePage> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    '${r.areaCm2} cm�  �  Chl: ${r.chlorophyllValue}',
+                                    'Width: ${r.widthCm}cm  Length: ${r.lengthCm}cm',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: kTextMid,
+                                    ),
+                                  ),
+                                  Text(
+                                    'Chl: ${_chlorophyllLabel(r)}',
                                     style: const TextStyle(
                                       fontSize: 12,
                                       color: kTextMid,
@@ -1115,7 +1306,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 _scanField(
                   'Leaf name / Sample ID',
                   _leafNameController,
-                  readOnly: _fieldsLocked,
+                  readOnly: true,
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -1125,7 +1316,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         'Length (cm)',
                         _lengthController,
                         keyboard: TextInputType.number,
-                        readOnly: _fieldsLocked,
+                        readOnly: true,
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -1134,7 +1325,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         'Width (cm)',
                         _widthController,
                         keyboard: TextInputType.number,
-                        readOnly: _fieldsLocked,
+                        readOnly: true,
                       ),
                     ),
                   ],
@@ -1143,29 +1334,6 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
           const SizedBox(height: 12),
-          // Loading indicator during analysis
-          if (_isAnalyzing)
-            Center(
-              child: Column(
-                children: [
-                  const SizedBox(height: 8),
-                  const CircularProgressIndicator(
-                    color: kGreenMid,
-                    strokeWidth: 2.5,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Analyzing leaf...',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: kGreenMid,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-              ),
-            ),
           // Status
           if (_connectionStatus.isNotEmpty)
             Padding(
@@ -1242,7 +1410,9 @@ class _MyHomePageState extends State<MyHomePage> {
                       color: kGreenMid,
                     ),
                     label: Text(
-                      _isScanning ? 'Scanning...' : 'Scan Bluetooth Devices',
+                      _isScanning
+                          ? 'Searching...'
+                          : 'Search Chlorophyll Device',
                       style: const TextStyle(fontSize: 12, color: kGreenMid),
                     ),
                     style: OutlinedButton.styleFrom(
@@ -1256,14 +1426,16 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(width: 10),
                 GestureDetector(
-                  onTap: _isCameraActive
-                      ? _captureLeafImage
-                      : _readChlorophyllValue,
+                  onTap: _isAnalyzing
+                      ? null
+                      : (_isCameraActive
+                            ? _captureLeafImage
+                            : _openCameraToScanLeaf),
                   child: Container(
                     width: 54,
                     height: 54,
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: _isAnalyzing ? kGreenPale : Colors.white,
                       shape: BoxShape.circle,
                       border: Border.all(color: kGreenMid, width: 2),
                       boxShadow: [
@@ -1284,14 +1456,14 @@ class _MyHomePageState extends State<MyHomePage> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _saveScanReport,
+                    onPressed: _fieldsLocked ? _saveScanReport : null,
                     icon: const Icon(
                       Icons.save_alt,
                       size: 16,
                       color: Colors.white,
                     ),
                     label: const Text(
-                      'Save Report',
+                      'Save',
                       style: TextStyle(fontSize: 12, color: Colors.white),
                     ),
                     style: ElevatedButton.styleFrom(
@@ -1325,6 +1497,7 @@ class _MyHomePageState extends State<MyHomePage> {
             _isCameraActive &&
             _isCameraInitialized &&
             _cameraController?.value.isInitialized == true;
+        final frozenFramePath = _capturedImagePath;
 
         return Center(
           child: SizedBox(
@@ -1337,6 +1510,13 @@ class _MyHomePageState extends State<MyHomePage> {
                 children: [
                   if (hasLiveCamera)
                     _buildCameraPreview()
+                  else if (frozenFramePath != null)
+                    Image.file(
+                      File(frozenFramePath),
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) =>
+                          const ColoredBox(color: Color(0xFF3A6F43)),
+                    )
                   else
                     Container(
                       color: const Color(0xFF3A6F43),
@@ -1349,6 +1529,28 @@ class _MyHomePageState extends State<MyHomePage> {
                       ),
                     ),
                   CustomPaint(painter: _CornerBracketPainter()),
+                  if (_isAnalyzing)
+                    Container(
+                      color: Colors.black.withValues(alpha: 0.42),
+                      child: const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 3,
+                          ),
+                          SizedBox(height: 12),
+                          Text(
+                            'Analyzing leaf...',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1384,6 +1586,8 @@ class _MyHomePageState extends State<MyHomePage> {
     TextInputType keyboard = TextInputType.text,
     bool readOnly = false,
   }) {
+    final hasValue = controller.text.trim().isNotEmpty;
+
     return SizedBox(
       height: 44,
       child: TextField(
@@ -1392,14 +1596,14 @@ class _MyHomePageState extends State<MyHomePage> {
         readOnly: readOnly,
         style: TextStyle(
           fontSize: 13,
-          color: readOnly ? kGreenMid : kTextDark,
-          fontWeight: readOnly ? FontWeight.w600 : FontWeight.normal,
+          color: hasValue ? kGreenMid : kTextDark,
+          fontWeight: hasValue ? FontWeight.w600 : FontWeight.normal,
         ),
         decoration: InputDecoration(
           hintText: hint,
           hintStyle: const TextStyle(color: kTextLight, fontSize: 13),
           filled: true,
-          fillColor: readOnly ? kGreenPale : Colors.white,
+          fillColor: hasValue ? kGreenPale : Colors.white,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,
             vertical: 0,
@@ -1407,25 +1611,25 @@ class _MyHomePageState extends State<MyHomePage> {
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(22),
             borderSide: BorderSide(
-              color: readOnly ? kGreenAccent : Colors.transparent,
-              width: readOnly ? 1.5 : 0,
+              color: hasValue ? kGreenAccent : Colors.transparent,
+              width: hasValue ? 1.5 : 0,
             ),
           ),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(22),
             borderSide: BorderSide(
-              color: readOnly ? kGreenAccent : Colors.transparent,
-              width: readOnly ? 1.5 : 0,
+              color: hasValue ? kGreenAccent : Colors.transparent,
+              width: hasValue ? 1.5 : 0,
             ),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(22),
             borderSide: BorderSide(
-              color: readOnly ? kGreenMid : kGreenAccent,
+              color: hasValue ? kGreenMid : kGreenAccent,
               width: 1.2,
             ),
           ),
-          suffixIcon: readOnly
+          suffixIcon: hasValue
               ? const Icon(Icons.check_circle, color: kGreenAccent, size: 20)
               : null,
         ),
@@ -1508,14 +1712,14 @@ class _MyHomePageState extends State<MyHomePage> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              'Size: ${r.lengthCm} cm � ${r.widthCm} cm = ${r.areaCm2} cm�',
+                              'Width: ${r.widthCm}cm   Length: ${r.lengthCm}cm',
                               style: const TextStyle(
                                 fontSize: 13,
                                 color: kTextMid,
                               ),
                             ),
                             Text(
-                              'Chlorophyll: ${r.chlorophyllValue}   Status: ${r.status}',
+                              'Chlorophyll: ${_chlorophyllLabel(r)}   Status: ${r.status}',
                               style: const TextStyle(
                                 fontSize: 13,
                                 color: kTextMid,
@@ -2021,9 +2225,67 @@ class _MyHomePageState extends State<MyHomePage> {
     return '${dt.day}/${dt.month}';
   }
 
+  String _chlorophyllLabel(LeafScanReport report) =>
+      report.chlorophyllValue?.toString() ?? 'Pending';
+
   /// Capitalizes first letter of string for display
   String _capitalize(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+}
+
+class _LeafScanAnalysis {
+  const _LeafScanAnalysis({
+    required this.leafType,
+    required this.lengthCm,
+    required this.widthCm,
+  });
+
+  final String leafType;
+  final double lengthCm;
+  final double widthCm;
+}
+
+class _LeafImageProfile {
+  const _LeafImageProfile({
+    required this.leafPixelCount,
+    required this.greenCoverage,
+    required this.bboxCoverage,
+    required this.fillRatio,
+    required this.longToShortRatio,
+    required this.meanHue,
+    required this.meanSaturation,
+    required this.meanValue,
+    required this.hueHistogram,
+  });
+
+  factory _LeafImageProfile.empty() => const _LeafImageProfile(
+    leafPixelCount: 0,
+    greenCoverage: 0,
+    bboxCoverage: 0,
+    fillRatio: 0,
+    longToShortRatio: 0,
+    meanHue: 0,
+    meanSaturation: 0,
+    meanValue: 0,
+    hueHistogram: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  );
+
+  final int leafPixelCount;
+  final double greenCoverage;
+  final double bboxCoverage;
+  final double fillRatio;
+  final double longToShortRatio;
+  final double meanHue;
+  final double meanSaturation;
+  final double meanValue;
+  final List<double> hueHistogram;
+
+  bool get hasLeafCandidate =>
+      leafPixelCount >= 180 &&
+      greenCoverage >= 0.018 &&
+      bboxCoverage >= 0.035 &&
+      fillRatio >= 0.12 &&
+      meanSaturation >= 0.18;
 }
 
 // --- Corner Bracket Painter ---------------------------------------------------

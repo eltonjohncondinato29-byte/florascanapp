@@ -19,6 +19,7 @@ class _AuthPageState extends State<AuthPage> {
   bool _rememberMe = false;
   String? _errorMessage;
   static const int _signupLimit = 5;
+  static const String _allowedSignupEmailDomain = '@spamast.edu.ph';
 
   @override
   void initState() {
@@ -84,6 +85,38 @@ class _AuthPageState extends State<AuthPage> {
       return _PasswordStrength.medium;
     }
     return _PasswordStrength.strong;
+  }
+
+  bool _isAllowedSignupEmail(String email) {
+    return email.toLowerCase().endsWith(_allowedSignupEmailDomain);
+  }
+
+  bool _isDuplicateSignupResponse(AuthResponse response) {
+    final identities = response.user?.identities;
+    return response.session == null && identities != null && identities.isEmpty;
+  }
+
+  bool _isDuplicateEmailError(String message) {
+    return message.contains('already registered') ||
+        message.contains('already exists') ||
+        message.contains('duplicate') ||
+        message.contains('email exists') ||
+        message.contains('user already') ||
+        message.contains('identity already');
+  }
+
+  Future<bool> _isEmailAlreadyRegistered(String email) async {
+    for (final table in ['profiles', 'users']) {
+      try {
+        final rows =
+            await supabase.from(table).select('id').eq('email', email).limit(1)
+                as List<dynamic>;
+        if (rows.isNotEmpty) return true;
+      } catch (_) {
+        // Some projects do not expose email in public profile tables.
+      }
+    }
+    return false;
   }
 
   /// Callback triggered on password change to update strength indicator
@@ -228,7 +261,7 @@ class _AuthPageState extends State<AuthPage> {
   Future<void> _submit() async {
     setState(() => _errorMessage = null);
 
-    final email = _emailController.text.trim();
+    final email = _emailController.text.trim().toLowerCase();
     final username = _usernameController.text.trim();
     final password = _passwordController.text;
 
@@ -249,6 +282,21 @@ class _AuthPageState extends State<AuthPage> {
 
     // Password strength check on signup
     if (!_isLogin) {
+      if (!_isAllowedSignupEmail(email)) {
+        setState(
+          () => _errorMessage = 'Use Institutional email address to sign up.',
+        );
+        return;
+      }
+
+      if (await _isEmailAlreadyRegistered(email)) {
+        setState(
+          () => _errorMessage =
+              'This email address is already registered. Please log in.',
+        );
+        return;
+      }
+
       final pwError = _validatePassword(password);
       if (pwError != null) {
         setState(() => _errorMessage = pwError);
@@ -298,7 +346,12 @@ class _AuthPageState extends State<AuthPage> {
           data: {'username': username},
         );
 
-        if (response.user == null) {
+        if (_isDuplicateSignupResponse(response)) {
+          setState(
+            () => _errorMessage =
+                'This email address is already registered. Please log in.',
+          );
+        } else if (response.user == null) {
           setState(
             () => _errorMessage =
                 'Sign up failed. Please verify your email and try again.',
@@ -321,6 +374,9 @@ class _AuthPageState extends State<AuthPage> {
         if (msg.contains('over_email_send_rate_limit')) {
           _errorMessage =
               'Too many signup attempts. Wait a few minutes and try again.';
+        } else if (!_isLogin && _isDuplicateEmailError(msg)) {
+          _errorMessage =
+              'This email address is already registered. Please log in.';
         } else if (_isLogin) {
           if (msg.contains('invalid login credentials') ||
               msg.contains('invalid_grant') ||
