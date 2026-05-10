@@ -347,8 +347,7 @@ class _AuthPageState extends State<AuthPage> {
 
         if (_isDuplicateSignupResponse(response)) {
           setState(
-            () => _errorMessage =
-                'This email address is already registered. Please log in.',
+            () => _errorMessage = 'This email address is already registered.',
           );
         } else if (response.user == null) {
           setState(
@@ -374,8 +373,7 @@ class _AuthPageState extends State<AuthPage> {
           _errorMessage =
               'Too many signup attempts. Wait a few minutes and try again.';
         } else if (!_isLogin && _isDuplicateEmailError(msg)) {
-          _errorMessage =
-              'This email address is already registered. Please log in.';
+          _errorMessage = 'This email address is already registered.';
         } else if (_isLogin) {
           if (msg.contains('invalid login credentials') ||
               msg.contains('invalid_grant') ||
