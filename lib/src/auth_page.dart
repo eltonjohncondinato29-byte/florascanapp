@@ -291,8 +291,7 @@ class _AuthPageState extends State<AuthPage> {
 
       if (await _isEmailAlreadyRegistered(email)) {
         setState(
-          () => _errorMessage =
-              'This email address is already registered. Please log in.',
+          () => _errorMessage = 'This email address is already registered.',
         );
         return;
       }
