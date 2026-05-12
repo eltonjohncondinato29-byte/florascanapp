@@ -18,17 +18,21 @@ class _AuthPageState extends State<AuthPage> {
   bool _obscurePassword = true;
   bool _rememberMe = false;
   String? _errorMessage;
-  static const int _signupLimit = 5;
+  bool _isLockedOut = false;
+  int _lockoutSecondsRemaining = 0;
+  Timer? _lockoutTimer;
   static const String _allowedSignupEmailDomain = '@spamast.edu.ph';
 
   @override
   void initState() {
     super.initState();
     _loadRememberedLogin();
+    _checkLockoutOnInit();
   }
 
   @override
   void dispose() {
+    _lockoutTimer?.cancel();
     _emailController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
@@ -96,27 +100,24 @@ class _AuthPageState extends State<AuthPage> {
     return response.session == null && identities != null && identities.isEmpty;
   }
 
-  bool _isDuplicateEmailError(String message) {
-    return message.contains('already registered') ||
-        message.contains('already exists') ||
-        message.contains('duplicate') ||
-        message.contains('email exists') ||
-        message.contains('user already') ||
-        message.contains('identity already');
-  }
+  /// Checks if email already exists in the profiles table
+  /// Returns error message if exists, null if doesn't exist
+  Future<Map<String, String>?> _checkIfEmailExists(String email) async {
+    try {
+      final profileRows = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('email', email)
+          .limit(1);
 
-  Future<bool> _isEmailAlreadyRegistered(String email) async {
-    for (final table in ['profiles', 'users']) {
-      try {
-        final rows =
-            await supabase.from(table).select('id').eq('email', email).limit(1)
-                as List<dynamic>;
-        if (rows.isNotEmpty) return true;
-      } catch (_) {
-        // Some projects do not expose email in public profile tables.
+      if (profileRows.isNotEmpty) {
+        return {'message': 'Email already Registered.'};
       }
+    } catch (_) {
+      // profiles table check failed, allow signup to proceed
     }
-    return false;
+
+    return null;
   }
 
   /// Callback triggered on password change to update strength indicator
@@ -271,12 +272,11 @@ class _AuthPageState extends State<AuthPage> {
     }
 
     // Check if user is in cooldown (only for login)
+    if (_isLogin && _isLockedOut) {
+      return; // button should be disabled, but guard anyway
+    }
     if (_isLogin && await _isInCooldown()) {
-      final remainingSeconds = await _getRemainingCooldownSeconds();
-      setState(
-        () => _errorMessage =
-            'Too many failed login attempts. Try again in ${_formatCooldownTime(remainingSeconds)}',
-      );
+      await _startLockoutTimer();
       return;
     }
 
@@ -289,10 +289,10 @@ class _AuthPageState extends State<AuthPage> {
         return;
       }
 
-      if (await _isEmailAlreadyRegistered(email)) {
-        setState(
-          () => _errorMessage = 'This email address is already registered.',
-        );
+      // Check if email already exists and handle accordingly
+      final existingUser = await _checkIfEmailExists(email);
+      if (existingUser != null) {
+        setState(() => _errorMessage = existingUser['message']);
         return;
       }
 
@@ -318,15 +318,11 @@ class _AuthPageState extends State<AuthPage> {
           final remainingAttempts = _maxLoginAttempts - attempts;
 
           if (remainingAttempts <= 0) {
-            final remainingSeconds = await _getRemainingCooldownSeconds();
-            setState(
-              () => _errorMessage =
-                  'Account locked. Try again in ${_formatCooldownTime(remainingSeconds)}',
-            );
+            await _startLockoutTimer();
           } else {
             setState(
               () => _errorMessage =
-                  'Unable to sign in. Check your credentials. ($remainingAttempts attempts remaining)',
+                  'Incorrect email or password. $remainingAttempts attempt${remainingAttempts == 1 ? '' : 's'} remaining.',
             );
           }
         } else {
@@ -336,9 +332,6 @@ class _AuthPageState extends State<AuthPage> {
           widget.onSignedIn();
         }
       } else {
-        final canSignUp = await _checkSignupLimit();
-        if (!canSignUp) return;
-
         final response = await supabase.auth.signUp(
           email: email,
           password: password,
@@ -346,9 +339,9 @@ class _AuthPageState extends State<AuthPage> {
         );
 
         if (_isDuplicateSignupResponse(response)) {
-          setState(
-            () => _errorMessage = 'This email address is already registered.',
-          );
+          setState(() => _errorMessage = 'Email already Registered.');
+          _isLogin = true;
+          return;
         } else if (response.user == null) {
           setState(
             () => _errorMessage =
@@ -368,56 +361,65 @@ class _AuthPageState extends State<AuthPage> {
       }
     } catch (error) {
       final msg = error.toString().toLowerCase();
-      setState(() {
+      if (_isLogin) {
         if (msg.contains('over_email_send_rate_limit')) {
-          _errorMessage =
-              'Too many signup attempts. Wait a few minutes and try again.';
-        } else if (!_isLogin && _isDuplicateEmailError(msg)) {
-          _errorMessage = 'This email address is already registered.';
-        } else if (_isLogin) {
-          if (msg.contains('invalid login credentials') ||
-              msg.contains('invalid_grant') ||
-              msg.contains('invalid password')) {
-            _errorMessage = 'Login failed. Check your email and password.';
-          } else if (msg.contains('confirm') ||
-              msg.contains('email not confirmed')) {
-            _errorMessage =
-                'Email not confirmed. Please check your inbox and verify.';
+          setState(
+            () => _errorMessage =
+                'Too many login attempts. Wait 5 minutes and try again.',
+          );
+        } else if (msg.contains('invalid login credentials') ||
+            msg.contains('invalid_grant') ||
+            msg.contains('invalid password') ||
+            msg.contains('invalid email') ||
+            msg.contains('wrong password')) {
+          // Bad credentials thrown as exception - count the attempt
+          await _incrementLoginAttempts();
+          final attempts = await _readSecureInt(_loginAttemptsKey);
+          final remainingAttempts = _maxLoginAttempts - attempts;
+          if (remainingAttempts <= 0) {
+            await _startLockoutTimer();
           } else {
-            _errorMessage = 'Login failed. Please try again.';
+            setState(
+              () => _errorMessage =
+                  'Incorrect email or password. $remainingAttempts attempt${remainingAttempts == 1 ? '' : 's'} remaining.',
+            );
           }
+        } else if (msg.contains('confirm') ||
+            msg.contains('email not confirmed')) {
+          setState(
+            () => _errorMessage =
+                'Email not confirmed. Please check your inbox and verify.',
+          );
         } else {
-          _errorMessage =
-              'Signup failed. Please try again or log in if you already have an account.';
+          await _incrementLoginAttempts();
+          final attempts = await _readSecureInt(_loginAttemptsKey);
+          final remainingAttempts = _maxLoginAttempts - attempts;
+          if (remainingAttempts <= 0) {
+            await _startLockoutTimer();
+          } else {
+            setState(
+              () => _errorMessage =
+                  'Login failed. $remainingAttempts attempt${remainingAttempts == 1 ? '' : 's'} remaining.',
+            );
+          }
         }
-      });
+      } else {
+        // Signup error handling
+        setState(() {
+          if (msg.contains('invalid email') || msg.contains('email invalid')) {
+            _errorMessage = 'Please enter a valid institutional email address.';
+          } else if (msg.contains('already') ||
+              msg.contains('registered') ||
+              msg.contains('user already')) {
+            _errorMessage = 'Email already Registered.';
+          } else {
+            _errorMessage = 'Email already Registered.';
+          }
+        });
+      }
     } finally {
       setState(() => _isLoading = false);
     }
-  }
-
-  /// Gets remote user count from database to check signup limit
-  Future<int?> _getRemoteUserCount() async {
-    for (final table in ['profiles', 'users']) {
-      try {
-        final rows = await supabase.from(table).select('id') as List<dynamic>;
-        return rows.length;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  /// Checks if signup limit has been reached
-  Future<bool> _checkSignupLimit() async {
-    final remoteCount = await _getRemoteUserCount();
-    if (remoteCount != null && remoteCount >= _signupLimit) {
-      setState(
-        () => _errorMessage =
-            'Signup limit reached. Only $_signupLimit users can register.',
-      );
-      return false;
-    }
-    return true;
   }
 
   // --- Rate Limiting Methods ------------------------------------------------
@@ -462,6 +464,40 @@ class _AuthPageState extends State<AuthPage> {
         _loginCooldownDuration.inSeconds -
         now.difference(lastAttempt).inSeconds;
     return remaining > 0 ? remaining : 0;
+  }
+
+  /// Starts a live countdown timer for the lockout period
+  Future<void> _startLockoutTimer() async {
+    final remaining = await _getRemainingCooldownSeconds();
+    if (!mounted) return;
+    setState(() {
+      _isLockedOut = true;
+      _lockoutSecondsRemaining = remaining;
+      _errorMessage = null;
+    });
+    _lockoutTimer?.cancel();
+    _lockoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _lockoutSecondsRemaining--;
+        if (_lockoutSecondsRemaining <= 0) {
+          timer.cancel();
+          _isLockedOut = false;
+          _lockoutSecondsRemaining = 0;
+          _resetLoginAttempts();
+        }
+      });
+    });
+  }
+
+  /// Checks on app init if a lockout is still active from a previous session
+  Future<void> _checkLockoutOnInit() async {
+    if (await _isInCooldown()) {
+      await _startLockoutTimer();
+    }
   }
 
   /// Formats cooldown time as MM:SS string
@@ -721,13 +757,55 @@ class _AuthPageState extends State<AuthPage> {
                   if (isSignup)
                     _buildPasswordStrengthBar(_passwordController.text),
 
-                  // ==================== AUTH ERROR MESSAGE ====================
-                  if (_errorMessage != null) ...[
+                  // ==================== AUTH ERROR / SUCCESS MESSAGE ====================
+                  if (_isLockedOut) ...[
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Colors.redAccent.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          const Text(
+                            'Too many failed attempts. Account locked.',
+                            style: TextStyle(
+                              color: Colors.redAccent,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Try again in ${_formatCooldownTime(_lockoutSecondsRemaining)}',
+                            style: const TextStyle(
+                              color: Colors.redAccent,
+                              fontWeight: FontWeight.w500,
+                              fontSize: 13,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ] else if (_errorMessage != null) ...[
                     const SizedBox(height: 4),
                     Text(
                       _errorMessage!,
-                      style: const TextStyle(
-                        color: Colors.redAccent,
+                      style: TextStyle(
+                        color:
+                            _errorMessage!.toLowerCase().contains('succeeded')
+                            ? kGreenMid
+                            : Colors.redAccent,
                         fontWeight: FontWeight.w500,
                         fontSize: 13,
                       ),
@@ -742,13 +820,17 @@ class _AuthPageState extends State<AuthPage> {
                     width: double.infinity,
                     height: 50,
                     child: ElevatedButton(
-                      onPressed: _isLoading ? null : _submit,
+                      onPressed: (_isLoading || _isLockedOut) ? null : _submit,
                       style: ElevatedButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(26),
                         ),
-                        backgroundColor: const Color(0xFF7BE8A1),
-                        foregroundColor: Colors.black87,
+                        backgroundColor: _isLockedOut
+                            ? Colors.grey.shade300
+                            : const Color(0xFF7BE8A1),
+                        foregroundColor: _isLockedOut
+                            ? Colors.grey.shade500
+                            : Colors.black87,
                         elevation: 0,
                       ),
                       child: _isLoading
