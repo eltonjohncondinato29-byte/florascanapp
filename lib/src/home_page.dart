@@ -50,10 +50,11 @@ class _MyHomePageState extends State<MyHomePage> {
   double? _hsvGreenHue;
 
   // Pre-scan crop selection state
-  // null = showing crop selector, non-null = morphology scanner active
   String? _selectedCrop;
-  bool _showCropSelector =
-      true; // true = step 1 (crop select), false = step 2 (scanner)
+  bool _showCropSelector = true;
+
+  // Save success notice below scanner frame
+  bool _showSaveSuccess = false;
 
   @override
   void initState() {
@@ -69,18 +70,16 @@ class _MyHomePageState extends State<MyHomePage> {
     _lengthController.dispose();
     _widthController.dispose();
     _cameraController?.dispose();
-    _saveReports(); // Save reports before disposing
+    _saveReports();
     super.dispose();
   }
 
-  // Get user-specific storage key
   /// Generates user-specific storage key for leaf scan reports
   String _getUserReportsKey() {
     final userId = supabase.auth.currentUser?.id ?? 'unknown';
     return 'leaf_scan_reports_$userId';
   }
 
-  // Save reports to secure storage (user-specific)
   /// Saves all leaf scan reports to secure storage (user-specific)
   Future<void> _saveReports() async {
     final jsonList = _reports.map((r) => r.toJson()).toList();
@@ -88,7 +87,6 @@ class _MyHomePageState extends State<MyHomePage> {
     await appSecureStorage.write(key: _getUserReportsKey(), value: jsonString);
   }
 
-  // Load reports from secure storage (user-specific)
   /// Loads all leaf scan reports from secure storage (user-specific)
   Future<void> _loadReports() async {
     try {
@@ -271,11 +269,11 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
-    // Start the camera preview
     setState(() {
       _isCameraActive = true;
       _isAnalyzing = false;
       _capturedImagePath = null;
+      _showSaveSuccess = false;
       _connectionStatus = 'Position a leaf in frame.';
     });
   }
@@ -306,10 +304,8 @@ class _MyHomePageState extends State<MyHomePage> {
         return;
       }
 
-      // Freeze the camera frame
       final capturedImage = await _cameraController!.takePicture();
 
-      // Start analysis with loading effect
       if (!mounted) return;
       setState(() {
         _isAnalyzing = true;
@@ -319,11 +315,11 @@ class _MyHomePageState extends State<MyHomePage> {
         _widthController.clear();
         _chlorophyllValue = null;
         _fieldsLocked = false;
+        _showSaveSuccess = false;
         _clearMorphologyMetrics();
         _connectionStatus = 'Analyzing leaf...';
       });
 
-      // Identify the leaf type
       final analysis = await _analyzeLeafImage(capturedImage.path);
 
       if (analysis == null) {
@@ -352,7 +348,6 @@ class _MyHomePageState extends State<MyHomePage> {
         return;
       }
 
-      // Auto-populate fields with scan results
       if (mounted) {
         setState(() {
           _leafNameController.text = analysis.leafType;
@@ -365,7 +360,7 @@ class _MyHomePageState extends State<MyHomePage> {
           _chlorophyllValue = null;
           _fieldsLocked = true;
           _isAnalyzing = false;
-          _connectionStatus = 'Leaf scanned successfully.';
+          _connectionStatus = 'Leaf scanned successfully!';
           _isCameraActive = false;
         });
 
@@ -401,7 +396,7 @@ class _MyHomePageState extends State<MyHomePage> {
     return 'Low chlorophyll - apply nitrogen-rich fertilizer.';
   }
 
-  /// Determines leaf health status (Healthy/Mild stress/Needs attention) based on chlorophyll
+  /// Determines leaf health status based on chlorophyll
   String _leafHealthStatus(int value) {
     if (value >= 55) return 'Healthy';
     if (value >= 40) return 'Mild stress';
@@ -409,12 +404,10 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   /// Analyzes the captured frame for leaf morphology using the pre-selected crop type.
-  /// Skips species classification — uses _selectedCrop to drive measurement directly.
   Future<_LeafScanAnalysis?> _analyzeLeafImage(String imagePath) async {
     try {
       if (imagePath.isEmpty) return null;
 
-      // Resolve crop label to the internal reference key
       final cropKey = _selectedCrop == 'Cucumber'
           ? 'Cucumber Leaf'
           : _selectedCrop == 'Robusta Coffee'
@@ -430,7 +423,6 @@ class _MyHomePageState extends State<MyHomePage> {
         return null;
       }
 
-      // Morphology-only: skip classification, use the pre-selected crop directly
       final measurements = _estimateLeafMeasurements(cropKey, capturedProfile);
 
       return _LeafScanAnalysis(
@@ -597,10 +589,7 @@ class _MyHomePageState extends State<MyHomePage> {
         width = 0;
     }
 
-    // Projected Leaf Area — ellipse approximation: (π/4) × L × W
     final areaCm2 = double.parse((pi / 4 * length * width).toStringAsFixed(2));
-
-    // Perimeter — Ramanujan's approximation for ellipse
     final a = length / 2;
     final b = width / 2;
     final h = pow(a - b, 2) / pow(a + b, 2);
@@ -609,13 +598,9 @@ class _MyHomePageState extends State<MyHomePage> {
         2,
       ),
     );
-
-    // Aspect Ratio — Length / Width
     final aspectRatio = double.parse(
       (width > 0 ? length / width : 0).toStringAsFixed(2),
     );
-
-    // HSV Green Hue — mean hue of detected green pixels
     final hsvGreenHue = double.parse(profile.meanHue.toStringAsFixed(1));
 
     return {
@@ -628,7 +613,10 @@ class _MyHomePageState extends State<MyHomePage> {
     };
   }
 
-  /// Saves current scan report to local storage and cloud database
+  // ==================== FIX: SAVE SCAN REPORT ====================
+  // Saves locally first (always), then attempts cloud upload.
+  // Extended morphology fields (perimeterCm, aspectRatio, hsvGreenHue)
+  // are now correctly included in the LeafScanReport.
   Future<void> _saveScanReport() async {
     final name = _leafNameController.text.trim();
     final lengthCm = double.tryParse(_lengthController.text) ?? 0;
@@ -645,6 +633,8 @@ class _MyHomePageState extends State<MyHomePage> {
     final areaCm2 =
         _areaCm2 ??
         double.parse((pi / 4 * lengthCm * widthCm).toStringAsFixed(2));
+
+    // Build the full report including all morphology fields
     final report = LeafScanReport(
       leafName: name,
       timestamp: DateTime.now(),
@@ -658,8 +648,31 @@ class _MyHomePageState extends State<MyHomePage> {
       fertilizer: chlorophyll == null
           ? 'Chlorophyll sensor not connected yet.'
           : _fertilizerRecommendation(chlorophyll),
+      perimeterCm: _perimeterCm,
+      aspectRatio: _aspectRatio,
+      hsvGreenHue: _hsvGreenHue,
     );
 
+    // ── Step 1: Save locally & update UI immediately ──
+    setState(() {
+      _reports.insert(0, report);
+      _showSaveSuccess = true;
+      _fieldsLocked = false;
+      _leafNameController.clear();
+      _lengthController.clear();
+      _widthController.clear();
+      _chlorophyllValue = null;
+      _clearMorphologyMetrics();
+      _connectionStatus = 'Saved!';
+    });
+    await _saveReports();
+
+    // Auto-hide the success notice after 3 seconds
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _showSaveSuccess = false);
+    });
+
+    // ── Step 2: Attempt cloud upload (non-blocking) ──
     try {
       final scanData = <String, dynamic>{
         'leaf_classification': name,
@@ -678,20 +691,9 @@ class _MyHomePageState extends State<MyHomePage> {
       }
 
       await supabase.schema('florascan').from('leaf_scans').insert(scanData);
-
-      setState(() {
-        _reports.insert(0, report);
-        _leafNameController.clear();
-        _lengthController.clear();
-        _widthController.clear();
-        _chlorophyllValue = null;
-        _fieldsLocked = false;
-        _clearMorphologyMetrics();
-        _connectionStatus = 'Saved!';
-      });
-      await _saveReports(); // Save to local storage
     } catch (e) {
-      setState(() => _connectionStatus = 'Database Error: $e');
+      // Cloud upload failed, but local save already succeeded
+      debugPrint('Cloud upload failed (local save OK): $e');
     }
   }
 
@@ -699,7 +701,6 @@ class _MyHomePageState extends State<MyHomePage> {
   void _selectTab(int index) {
     setState(() {
       _selectedIndex = index;
-      // Reset to crop selector step whenever entering scan tab
       if (index == 2) {
         _showCropSelector = true;
         _selectedCrop = null;
@@ -709,8 +710,6 @@ class _MyHomePageState extends State<MyHomePage> {
       _stopCamera();
     }
   }
-
-  // --- Bottom Nav ----------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -725,12 +724,11 @@ class _MyHomePageState extends State<MyHomePage> {
     return Scaffold(
       backgroundColor: const Color(0xFFF5F7F5),
       body: tabs[_selectedIndex],
-      bottomNavigationBar: _buildBottomNav(),
+      bottomNavigationBar: _selectedIndex == 2 ? null : _buildBottomNav(),
     );
   }
 
   // ==================== BOTTOM NAVIGATION ====================
-  /// Builds the bottom navigation bar with 5 tabs including center scan button
   Widget _buildBottomNav() {
     final items = [
       {'icon': Icons.home_filled, 'label': 'Dashboard'},
@@ -818,10 +816,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Dashboard Tab --------------------------------------------------------
-
   // ==================== DASHBOARD TAB ====================
-  /// Displays dashboard with current scan status, recent activity, and device info
   Widget _buildDashboardTab() {
     final user = supabase.auth.currentUser;
     final username =
@@ -837,13 +832,11 @@ class _MyHomePageState extends State<MyHomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // -- Top Bar: notification + settings on right, logo CENTERED --
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  // Logo perfectly centered
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -886,7 +879,6 @@ class _MyHomePageState extends State<MyHomePage> {
                       ),
                     ],
                   ),
-                  // Icons pinned to the right
                   Positioned(
                     right: 0,
                     child: Row(
@@ -909,7 +901,6 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             const SizedBox(height: 10),
-            // Welcome text
             Text(
               'Welcome, ${_capitalize(username)}!',
               textAlign: TextAlign.center,
@@ -920,19 +911,16 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             const SizedBox(height: 16),
-            // -- Cards ------------------------------------------------------
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Column(
                 children: [
-                  // -- Current Scan card (prototype style) ------------------
                   GestureDetector(
                     onTap: () => _selectTab(2),
                     child: _dashCard(
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          // Left: label + big number + subtitle + timestamp
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -979,7 +967,6 @@ class _MyHomePageState extends State<MyHomePage> {
                               ],
                             ),
                           ),
-                          // Right: device icon box
                           Container(
                             width: 56,
                             height: 72,
@@ -998,8 +985,6 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   const SizedBox(height: 14),
-
-                  // -- Recent Activity card (prototype: listed rows) ---------
                   _dashCard(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1036,8 +1021,6 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   const SizedBox(height: 14),
-
-                  // -- Device Status card (prototype style) ------------------
                   _dashCard(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1053,7 +1036,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         const SizedBox(height: 14),
                         Row(
                           children: [
-                            // Device icon with green tint when connected
                             Container(
                               width: 48,
                               height: 56,
@@ -1127,7 +1109,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds a stylized dashboard card with shadow and custom styling
   Widget _dashCard({required Widget child}) {
     return Container(
       width: double.infinity,
@@ -1147,9 +1128,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- History Tab ----------------------------------------------------------
-
-  /// Shows all previous leaf scan records in chronological order
+  // ==================== HISTORY TAB ====================
   Widget _buildHistoryTab() {
     return SafeArea(
       child: Column(
@@ -1204,7 +1183,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Header row: leaf name + timestamp
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -1228,12 +1206,10 @@ class _MyHomePageState extends State<MyHomePage> {
                             const SizedBox(height: 8),
                             const Divider(height: 1, color: kDivider),
                             const SizedBox(height: 8),
-                            // Morphology metrics grid (2 cols)
                             _buildHistoryMetricsGrid(r),
                             const SizedBox(height: 8),
                             const Divider(height: 1, color: kDivider),
                             const SizedBox(height: 8),
-                            // Chlorophyll Index row
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -1258,7 +1234,6 @@ class _MyHomePageState extends State<MyHomePage> {
                               ],
                             ),
                             const SizedBox(height: 4),
-                            // Status row
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -1291,7 +1266,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds a compact 2-column metrics grid for the History tab cards
   Widget _buildHistoryMetricsGrid(LeafScanReport r) {
     final metrics = <(String, String)>[
       ('Length', '${r.lengthCm} cm'),
@@ -1351,10 +1325,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Scan Tab -------------------------------------------------------------
-
   // ==================== SCAN TAB ====================
-  /// Routes between Step 1 (crop selector) and Step 2 (morphology scanner)
   Widget _buildScanTab() {
     return _showCropSelector
         ? _buildCropSelectorStep()
@@ -1362,7 +1333,6 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ==================== STEP 1: CROP SELECTOR ====================
-  /// Pre-scan step: user selects crop species before scanning begins
   Widget _buildCropSelectorStep() {
     const cucumber = 'Cucumber';
     const coffee = 'Robusta Coffee';
@@ -1371,7 +1341,6 @@ class _MyHomePageState extends State<MyHomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Top bar
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 12, 16, 0),
             child: Row(
@@ -1393,7 +1362,6 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
           const SizedBox(height: 8),
-          // Step indicator
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: Row(
@@ -1455,7 +1423,6 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
           const SizedBox(height: 28),
-          // Crop selection cards
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -1483,7 +1450,6 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ),
           const SizedBox(height: 16),
-          // Continue button
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
             child: SizedBox(
@@ -1499,9 +1465,9 @@ class _MyHomePageState extends State<MyHomePage> {
                           _widthController.clear();
                           _capturedImagePath = null;
                           _fieldsLocked = false;
+                          _showSaveSuccess = false;
                           _clearMorphologyMetrics();
-                          _connectionStatus =
-                              'Place a matte blue or black card behind the leaf, then tap Scan.';
+                          _connectionStatus = 'Place leaf in frame.';
                         });
                         WidgetsBinding.instance.addPostFrameCallback((_) {
                           if (mounted) unawaited(_openCameraToScanLeaf());
@@ -1540,7 +1506,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds a selectable crop card for the pre-scan crop selection step
   Widget _buildCropCard({
     required String cropKey,
     required String scientificName,
@@ -1575,7 +1540,6 @@ class _MyHomePageState extends State<MyHomePage> {
         ),
         child: Row(
           children: [
-            // Icon container
             Container(
               width: 52,
               height: 52,
@@ -1628,7 +1592,6 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             const SizedBox(width: 10),
-            // Selection indicator
             AnimatedContainer(
               duration: const Duration(milliseconds: 180),
               width: 22,
@@ -1652,17 +1615,32 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ==================== STEP 2: MORPHOLOGY SCANNER ====================
-  /// Morphology scanning interface - shows camera frame, metrics card, and device controls
   Widget _buildMorphologyScannerStep() {
     final cropLabel = _selectedCrop ?? 'Leaf';
+
+    final bool isScannedSuccess = _fieldsLocked;
+    final bool isAnalyzingNow = _isAnalyzing;
+    final Color statusDotColor = isAnalyzingNow
+        ? Colors.orange
+        : isScannedSuccess
+        ? kGreenAccent
+        : kGreenAccent;
+    final String statusText = isAnalyzingNow
+        ? 'Analyzing...'
+        : isScannedSuccess
+        ? 'Leaf scanned successfully!'
+        : _isCameraActive
+        ? 'Place leaf in frame'
+        : 'Ready to scan';
+
     return SafeArea(
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Top bar with back (returns to crop selector) and close
+          // ── Top bar ──
           Padding(
-            padding: const EdgeInsets.fromLTRB(8, 12, 16, 0),
+            padding: const EdgeInsets.fromLTRB(4, 10, 12, 0),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 IconButton(
                   icon: const Icon(
@@ -1675,6 +1653,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     _stopCamera();
                     _fieldsLocked = false;
                     _capturedImagePath = null;
+                    _showSaveSuccess = false;
                     _leafNameController.clear();
                     _lengthController.clear();
                     _widthController.clear();
@@ -1682,14 +1661,12 @@ class _MyHomePageState extends State<MyHomePage> {
                     _connectionStatus = 'Disconnected';
                   }),
                 ),
-                // Step indicator
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
+                Expanded(
+                  child: Center(
+                    child: Container(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
+                        horizontal: 18,
+                        vertical: 6,
                       ),
                       decoration: BoxDecoration(
                         color: kGreenMid,
@@ -1698,268 +1675,188 @@ class _MyHomePageState extends State<MyHomePage> {
                       child: const Text(
                         'Step 2 of 2',
                         style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 13,
                           color: Colors.white,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      cropLabel,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: kTextMid,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 22, color: kTextMid),
-                  onPressed: () => _selectTab(0),
-                ),
-              ],
-            ),
-          ),
-          // Scanner icon and instruction
-          const Icon(Icons.straighten, size: 34, color: kGreenMid),
-          const SizedBox(height: 4),
-          const Text(
-            'Leaf Morphology Scanner',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: kTextDark,
-            ),
-          ),
-          const SizedBox(height: 2),
-          // Contrast card instruction banner
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFE3F2FD),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFF90CAF9), width: 1),
-            ),
-            child: const Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.info_outline, size: 16, color: Color(0xFF1565C0)),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Place a matte blue or black card behind the leaf to isolate it from the background before scanning.',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF1565C0),
-                      height: 1.4,
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: kGreenPale,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                      color: kGreenMid,
+                      size: 20,
                     ),
+                    onPressed: () {
+                      setState(() {
+                        _fieldsLocked = false;
+                        _capturedImagePath = null;
+                        _showSaveSuccess = false;
+                        _leafNameController.clear();
+                        _lengthController.clear();
+                        _widthController.clear();
+                        _clearMorphologyMetrics();
+                        _connectionStatus = 'Place leaf in frame.';
+                        _isAnalyzing = false;
+                      });
+                      unawaited(_openCameraToScanLeaf());
+                    },
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 6),
-          Flexible(child: _buildScannerFrame()),
-          const SizedBox(height: 10),
 
-          // ==================== RESULTS CARD ====================
-          if (_fieldsLocked) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: kGreenAccent, width: 1.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: kGreenMid.withValues(alpha: 0.08),
-                      blurRadius: 12,
-                      offset: const Offset(0, 3),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Header: crop name + check badge
-                    Row(
-                      children: [
-                        const Icon(Icons.eco, size: 15, color: kGreenMid),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            _leafNameController.text,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              color: kTextDark,
-                            ),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: kGreenPale,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.check_circle,
-                                color: kGreenMid,
-                                size: 12,
-                              ),
-                              SizedBox(width: 4),
-                              Text(
-                                'Scanned',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  color: kGreenMid,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    const Divider(height: 1, color: kDivider),
-                    const SizedBox(height: 10),
-
-                    // ── 6-metric grid (2 rows × 3 cols) ──
-                    _buildMetricsGrid(),
-
-                    const SizedBox(height: 10),
-                    const Divider(height: 1, color: kDivider),
-                    const SizedBox(height: 10),
-
-                    // Chlorophyll Index row — requires BT device
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 9,
-                            vertical: 5,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _chlorophyllValue != null
-                                ? kGreenPale
-                                : const Color(0xFFF5F5F5),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: _chlorophyllValue != null
-                                  ? kGreenAccent
-                                  : const Color(0xFFE0E0E0),
-                              width: 1,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.bluetooth,
-                                size: 12,
-                                color: _chlorophyllValue != null
-                                    ? kGreenMid
-                                    : kTextLight,
-                              ),
-                              const SizedBox(width: 5),
-                              Text(
-                                'Chlorophyll Index',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  color: _chlorophyllValue != null
-                                      ? kGreenMid
-                                      : kTextLight,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          _chlorophyllValue != null
-                              ? '$_chlorophyllValue'
-                              : 'Pending device',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w800,
-                            color: _chlorophyllValue != null
-                                ? kGreenDark
-                                : kTextLight,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+          // ── Crop title ──
+          Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 2),
+            child: Text(
+              cropLabel,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.w900,
+                color: kTextDark,
+                letterSpacing: -0.5,
               ),
             ),
-          ] else ...[
-            // Pre-scan placeholder: show empty name + length/width fields
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Column(
+          ),
+
+          // ── Status dot + text ──
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: statusDotColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                statusText,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isScannedSuccess ? kGreenMid : kTextMid,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+
+          // ── Info banner (tight, no extra space below) ──
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEEF4FF),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFB8D0FF), width: 1),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _scanField(
-                    'Leaf name / Sample ID',
-                    _leafNameController,
-                    readOnly: true,
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 14,
+                    color: Color(0xFF3B72D6),
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _scanField(
-                          'Length (cm)',
-                          _lengthController,
-                          keyboard: TextInputType.number,
-                          readOnly: true,
-                        ),
+                  SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      'Place a blue or black card behind the leaf to isolate it from the background before scanning.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF3B72D6),
+                        height: 1.35,
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _scanField(
-                          'Width (cm)',
-                          _widthController,
-                          keyboard: TextInputType.number,
-                          readOnly: true,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
             ),
-          ],
+          ),
+          const SizedBox(height: 8),
+
+          // ── Camera / scan frame — EXPANDED to fill available space ──
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildScannerFrame(),
+            ),
+          ),
+
+          // ── "Successfully saved!" notice below the frame ──
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            child: _showSaveSuccess
+                ? Padding(
+                    key: const ValueKey('save_success'),
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: kGreenPale,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: kGreenAccent.withValues(alpha: 0.6),
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.check_circle_rounded,
+                            size: 16,
+                            color: kGreenMid,
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Successfully saved!',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: kGreenDark,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : const SizedBox(key: ValueKey('save_empty'), height: 6),
+          ),
 
           const SizedBox(height: 6),
-          // Status message
-          if (_connectionStatus.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
-              child: Text(
-                _connectionStatus,
-                style: const TextStyle(fontSize: 12, color: kTextLight),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          // Bluetooth devices list
+
+          // ── Metrics grid ──
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: _buildNewMetricsGrid(),
+          ),
+          const SizedBox(height: 8),
+
+          // ── BT devices list (if any found) ──
           if (_foundDevices.isNotEmpty)
             SizedBox(
-              height: 80,
+              height: 72,
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 scrollDirection: Axis.horizontal,
@@ -1968,7 +1865,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     margin: const EdgeInsets.only(right: 8),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
-                      vertical: 8,
+                      vertical: 6,
                     ),
                     decoration: BoxDecoration(
                       color: kCardBg,
@@ -2007,37 +1904,55 @@ class _MyHomePageState extends State<MyHomePage> {
                 }).toList(),
               ),
             ),
-          const SizedBox(height: 8),
-          // Action buttons row
+
+          // ── Bottom action row: Scan BT | Capture | Save ──
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
             child: Row(
               children: [
+                // Scan Chlorophyll Device
                 Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _startScan,
-                    icon: const Icon(
-                      Icons.bluetooth_searching,
-                      size: 16,
-                      color: kGreenMid,
-                    ),
-                    label: Text(
-                      _isScanning
-                          ? 'Searching...'
-                          : 'Search Chlorophyll Device',
-                      style: const TextStyle(fontSize: 12, color: kGreenMid),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: kGreenMid),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(24),
+                  child: SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: _startScan,
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: kGreenMid, width: 1.5),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        backgroundColor: Colors.white,
+                        padding: EdgeInsets.zero,
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.bluetooth_searching_rounded,
+                            size: 18,
+                            color: kGreenMid,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _isScanning
+                                ? 'Searching...'
+                                : 'Scan Chlorophyll\nDevice',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: kGreenMid,
+                              fontWeight: FontWeight.w600,
+                              height: 1.2,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                // Scan / Capture button
+                const SizedBox(width: 12),
+
+                // Center capture button
                 GestureDetector(
                   onTap: _isAnalyzing
                       ? null
@@ -2045,47 +1960,72 @@ class _MyHomePageState extends State<MyHomePage> {
                             ? _captureLeafImage
                             : _openCameraToScanLeaf),
                   child: Container(
-                    width: 54,
-                    height: 54,
+                    width: 62,
+                    height: 62,
                     decoration: BoxDecoration(
-                      color: _isAnalyzing ? kGreenPale : Colors.white,
+                      color: Colors.white,
                       shape: BoxShape.circle,
-                      border: Border.all(color: kGreenMid, width: 2),
+                      border: Border.all(color: kGreenMid, width: 2.5),
                       boxShadow: [
                         BoxShadow(
-                          color: kGreenMid.withValues(alpha: 0.2),
-                          blurRadius: 10,
-                          offset: const Offset(0, 3),
+                          color: kGreenMid.withValues(alpha: 0.18),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
                         ),
                       ],
                     ),
-                    child: const Icon(
-                      Icons.qr_code_scanner,
-                      color: kGreenMid,
-                      size: 26,
-                    ),
+                    child: _isAnalyzing
+                        ? const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: kGreenMid,
+                            ),
+                          )
+                        : const Icon(
+                            Icons.crop_free_rounded,
+                            color: kGreenMid,
+                            size: 28,
+                          ),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
+
+                // Save button
                 Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _fieldsLocked ? _saveScanReport : null,
-                    icon: const Icon(
-                      Icons.save_alt,
-                      size: 16,
-                      color: Colors.white,
-                    ),
-                    label: const Text(
-                      'Save',
-                      style: TextStyle(fontSize: 12, color: Colors.white),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: kGreenMid,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(24),
+                  child: SizedBox(
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: _fieldsLocked ? _saveScanReport : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: kGreenMid,
+                        disabledBackgroundColor: const Color(0xFFD0D0D0),
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        padding: EdgeInsets.zero,
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.save_alt_rounded,
+                            size: 18,
+                            color: Colors.white,
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            'Save',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -2098,157 +2038,175 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ==================== METRICS GRID ====================
-  /// Builds the 3-column × 2-row morphology metrics grid inside the scan results card
-  Widget _buildMetricsGrid() {
+  Widget _buildNewMetricsGrid() {
     final lengthVal = _lengthController.text.isNotEmpty
         ? '${_lengthController.text} cm'
-        : '--';
+        : '- - - -';
     final widthVal = _widthController.text.isNotEmpty
         ? '${_widthController.text} cm'
-        : '--';
+        : '- - - -';
     final areaVal = _areaCm2 != null
         ? '${_areaCm2!.toStringAsFixed(2)} cm²'
-        : '--';
+        : '- - - -';
     final perimeterVal = _perimeterCm != null
         ? '${_perimeterCm!.toStringAsFixed(2)} cm'
-        : '--';
+        : '- - - -';
     final aspectVal = _aspectRatio != null
-        ? _aspectRatio!.toStringAsFixed(2)
-        : '--';
+        ? '${_aspectRatio!.toStringAsFixed(2)} L/W'
+        : '- - - -';
     final hueVal = _hsvGreenHue != null
         ? '${_hsvGreenHue!.toStringAsFixed(1)}°'
-        : '--';
+        : '- - - -';
+    final chlorophyllVal = _chlorophyllValue != null
+        ? '$_chlorophyllValue'
+        : '- - - -';
 
-    final metrics = [
-      (Icons.height_rounded, 'Length (cm)', lengthVal),
-      (Icons.width_normal_rounded, 'Width (cm)', widthVal),
-      (Icons.crop_free_rounded, 'Proj. Area (cm²)', areaVal),
-      (Icons.rounded_corner_rounded, 'Perimeter (cm)', perimeterVal),
-      (Icons.aspect_ratio_rounded, 'Aspect Ratio (L/W)', aspectVal),
-      (Icons.color_lens_outlined, 'Hue (HSV Green)', hueVal),
+    final leftCol = [
+      ('Chlorophyll Index', chlorophyllVal),
+      ('Length', lengthVal),
+      ('Width', widthVal),
+      ('Proj. Area', areaVal),
     ];
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Each tile gets 1/3 of available width minus spacing
-        final tileWidth = (constraints.maxWidth - 16) / 3;
-        return Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: metrics.map((m) {
-            final (icon, label, value) = m;
-            return SizedBox(
-              width: tileWidth,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                decoration: BoxDecoration(
-                  color: kGreenPale,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(icon, size: 13, color: kGreenMid),
-                    const SizedBox(height: 4),
-                    Text(
-                      value,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                        color: kTextDark,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      label,
-                      style: const TextStyle(
-                        fontSize: 9,
-                        color: kTextLight,
-                        fontWeight: FontWeight.w500,
-                        height: 1.2,
-                      ),
-                      maxLines: 2,
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }).toList(),
-        );
-      },
+    final rightCol = [
+      ('Perimeter', perimeterVal),
+      ('Aspect Ratio', aspectVal),
+      ('Hue (HSV Green)', hueVal),
+    ];
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: leftCol.map((item) {
+              return _metricRow(item.$1, item.$2);
+            }).toList(),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: rightCol.map((item) {
+              return _metricRow(item.$1, item.$2);
+            }).toList(),
+          ),
+        ),
+      ],
     );
   }
 
+  Widget _metricRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Flexible(
+            flex: 5,
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              style: const TextStyle(
+                fontSize: 12,
+                color: kTextMid,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            flex: 5,
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 12,
+                color: value.contains('- -') ? kTextLight : kTextDark,
+                fontWeight: value.contains('- -')
+                    ? FontWeight.w400
+                    : FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==================== SCANNER FRAME ====================
+  // Frame now fills the full Expanded height — no more 0.72 cap.
   Widget _buildScannerFrame() {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final availableWidth = max(0.0, constraints.maxWidth - 40);
-        final frameWidth = min(432.0, availableWidth);
-        final frameHeight = min(
-          315.0,
-          min(frameWidth / 1.38, constraints.maxHeight),
-        );
+        final frameWidth = constraints.maxWidth;
+        // Use the full available height from the Expanded parent
+        final frameHeight = constraints.maxHeight;
         final hasLiveCamera =
             _isCameraActive &&
             _isCameraInitialized &&
             _cameraController?.value.isInitialized == true;
         final frozenFramePath = _capturedImagePath;
 
-        return Center(
-          child: SizedBox(
-            width: frameWidth,
-            height: frameHeight,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  if (hasLiveCamera)
-                    _buildCameraPreview()
-                  else if (frozenFramePath != null)
-                    Image.file(
-                      File(frozenFramePath),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) =>
-                          const ColoredBox(color: Color(0xFF3A6F43)),
-                    )
-                  else
-                    Container(
-                      color: const Color(0xFF3A6F43),
-                      child: const Center(
-                        child: Icon(
-                          Icons.eco,
-                          size: 78,
-                          color: Color(0x55FFFFFF),
+        return SizedBox(
+          width: frameWidth,
+          height: frameHeight,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (hasLiveCamera)
+                  _buildCameraPreview()
+                else if (frozenFramePath != null)
+                  Image.file(
+                    File(frozenFramePath),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) =>
+                        const ColoredBox(color: Color(0xFF3A6F43)),
+                  )
+                else
+                  Container(
+                    color: const Color(0xFF2E7D32),
+                    child: Center(
+                      child: Icon(
+                        Icons.eco,
+                        size: 72,
+                        color: Colors.white.withValues(alpha: 0.25),
+                      ),
+                    ),
+                  ),
+                CustomPaint(painter: _CornerBracketPainter()),
+                if (!hasLiveCamera && frozenFramePath == null)
+                  CustomPaint(painter: _LeafGuidePainter()),
+                if (_isAnalyzing)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.42),
+                    child: const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 3,
                         ),
-                      ),
-                    ),
-                  CustomPaint(painter: _CornerBracketPainter()),
-                  if (_isAnalyzing)
-                    Container(
-                      color: Colors.black.withValues(alpha: 0.42),
-                      child: const Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          CircularProgressIndicator(
+                        SizedBox(height: 12),
+                        Text(
+                          'Analyzing leaf...',
+                          style: TextStyle(
                             color: Colors.white,
-                            strokeWidth: 3,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
                           ),
-                          SizedBox(height: 12),
-                          Text(
-                            'Analyzing leaf...',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
         );
@@ -2274,8 +2232,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // ==================== SCAN INPUT FIELD ====================
-  /// Builds a text input field for scan data (name, length, width)
+  // ==================== SCAN INPUT FIELD (kept for internal use) ====================
   Widget _scanField(
     String hint,
     TextEditingController controller, {
@@ -2333,9 +2290,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Reports Tab ----------------------------------------------------------
-
-  /// Shows detailed analysis reports for all completed leaf measurements
+  // ==================== REPORTS TAB ====================
   Widget _buildReportsTab() {
     return SafeArea(
       child: Column(
@@ -2375,8 +2330,6 @@ class _MyHomePageState extends State<MyHomePage> {
                           : r.status == 'Leaf scanned'
                           ? kTextLight
                           : Colors.orange;
-                      // Sensor-not-connected message is a warning — show in red.
-                      // Actual fertilizer recommendations are positive — show in green.
                       final fertilizerColor = hasChlorophyll
                           ? kGreenMid
                           : Colors.redAccent;
@@ -2398,7 +2351,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Header: leaf name + timestamp
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2422,12 +2374,10 @@ class _MyHomePageState extends State<MyHomePage> {
                             const SizedBox(height: 10),
                             const Divider(height: 1, color: kDivider),
                             const SizedBox(height: 10),
-                            // Full morphology metrics (3-col grid, same style as scan card)
                             _buildReportMetricsGrid(r),
                             const SizedBox(height: 10),
                             const Divider(height: 1, color: kDivider),
                             const SizedBox(height: 8),
-                            // Chlorophyll Index row
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2452,7 +2402,6 @@ class _MyHomePageState extends State<MyHomePage> {
                               ],
                             ),
                             const SizedBox(height: 4),
-                            // Status row
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2475,7 +2424,6 @@ class _MyHomePageState extends State<MyHomePage> {
                               ],
                             ),
                             const SizedBox(height: 8),
-                            // Fertilizer recommendation / sensor notice
                             Container(
                               width: double.infinity,
                               padding: const EdgeInsets.symmetric(
@@ -2529,7 +2477,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds the full 3-column morphology metrics grid for Report cards
   Widget _buildReportMetricsGrid(LeafScanReport r) {
     final metrics = [
       (Icons.height_rounded, 'Length (cm)', '${r.lengthCm} cm'),
@@ -2609,9 +2556,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Profile Tab ----------------------------------------------------------
-
-  /// Displays user profile with account info and sign-out option
+  // ==================== PROFILE TAB ====================
   Widget _buildProfileTab() {
     final user = supabase.auth.currentUser;
     final username =
@@ -2710,9 +2655,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Settings Bottom Sheet -------------------------------------------------
-
-  /// Shows the Settings bottom sheet with theme, notifications, and about app
+  // ==================== SETTINGS BOTTOM SHEET ====================
   void _showSettingsBottomSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -2744,7 +2687,6 @@ class _MyHomePageState extends State<MyHomePage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // Header
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -2769,8 +2711,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         ],
                       ),
                       const SizedBox(height: 24),
-
-                      // -- Theme Section ------------------------------------
                       _buildSettingsSection(
                         title: 'Theme & Display',
                         children: [
@@ -2792,8 +2732,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         ],
                       ),
                       const SizedBox(height: 20),
-
-                      // -- Notifications Section ----------------------------
                       _buildSettingsSection(
                         title: 'Notifications',
                         children: [
@@ -2830,8 +2768,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         ],
                       ),
                       const SizedBox(height: 20),
-
-                      // -- Data & Privacy Section ---------------------------
                       _buildSettingsSection(
                         title: 'Data & Privacy',
                         children: [
@@ -2854,8 +2790,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         ],
                       ),
                       const SizedBox(height: 20),
-
-                      // -- About App Section --------------------------------
                       _buildSettingsSection(
                         title: 'About',
                         children: [
@@ -2888,7 +2822,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds a settings section container with title and list of options
   Widget _buildSettingsSection({
     required String title,
     required List<Widget> children,
@@ -2918,7 +2851,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Builds an individual settings menu tile with icon, title, and optional trailing widget
   Widget _buildSettingsTile({
     required IconData icon,
     required String title,
@@ -2966,7 +2898,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Shows the About App dialog with app info, features, and version
   void _showAboutDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -3075,12 +3006,10 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Helpers --------------------------------------------------------------
-
+  // ==================== HELPERS ====================
   String _formatTime(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} ${dt.hour < 12 ? 'AM' : 'PM'}';
 
-  /// Formats DateTime as relative time (just now, 5m ago, 2h ago, 3/5)
   String _formatDate(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -3093,7 +3022,6 @@ class _MyHomePageState extends State<MyHomePage> {
   String _chlorophyllLabel(LeafScanReport report) =>
       report.chlorophyllValue?.toString() ?? 'Pending';
 
-  /// Capitalizes first letter of string for display
   String _capitalize(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 }
@@ -3163,11 +3091,9 @@ class _LeafImageProfile {
       meanSaturation >= 0.18;
 }
 
-// --- Corner Bracket Painter ---------------------------------------------------
-
+// ==================== CORNER BRACKET PAINTER ====================
 class _CornerBracketPainter extends CustomPainter {
   @override
-  /// Paints corner brackets at the four corners of the scan frame
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = Colors.white
@@ -3225,6 +3151,37 @@ class _CornerBracketPainter extends CustomPainter {
   }
 
   @override
-  /// Returns false since brackets don't change between repaints
   bool shouldRepaint(_CornerBracketPainter oldDelegate) => false;
+}
+
+// ==================== LEAF GUIDE PAINTER ====================
+class _LeafGuidePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.18)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final rx = size.width * 0.22;
+    final ry = size.height * 0.38;
+
+    const dashCount = 28;
+    const gapFraction = 0.45;
+    for (var i = 0; i < dashCount; i++) {
+      final startAngle = (2 * pi * i) / dashCount;
+      final sweepAngle = (2 * pi / dashCount) * (1 - gapFraction);
+      final rect = Rect.fromCenter(
+        center: Offset(cx, cy),
+        width: rx * 2,
+        height: ry * 2,
+      );
+      canvas.drawArc(rect, startAngle, sweepAngle, false, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_LeafGuidePainter oldDelegate) => false;
 }
