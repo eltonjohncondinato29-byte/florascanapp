@@ -11,6 +11,9 @@ class LeafScanReport {
     required this.chlorophyllValue,
     required this.status,
     required this.fertilizer,
+    this.perimeterCm,
+    this.aspectRatio,
+    this.hsvGreenHue,
   });
 
   final String leafName;
@@ -22,7 +25,11 @@ class LeafScanReport {
   final String status;
   final String fertilizer;
 
-  // Convert to JSON for storage
+  // Extended morphology fields
+  final double? perimeterCm;
+  final double? aspectRatio;
+  final double? hsvGreenHue;
+
   /// Converts LeafScanReport to JSON for secure storage
   Map<String, dynamic> toJson() => {
     'leafName': leafName,
@@ -33,9 +40,11 @@ class LeafScanReport {
     'chlorophyllValue': chlorophyllValue,
     'status': status,
     'fertilizer': fertilizer,
+    'perimeterCm': perimeterCm,
+    'aspectRatio': aspectRatio,
+    'hsvGreenHue': hsvGreenHue,
   };
 
-  // Create from JSON
   /// Creates LeafScanReport from JSON data
   factory LeafScanReport.fromJson(Map<String, dynamic> json) => LeafScanReport(
     leafName: json['leafName'] as String,
@@ -48,7 +57,8 @@ class LeafScanReport {
     fertilizer:
         json['fertilizer'] as String? ??
         'Chlorophyll sensor not connected yet.',
+    perimeterCm: (json['perimeterCm'] as num?)?.toDouble(),
+    aspectRatio: (json['aspectRatio'] as num?)?.toDouble(),
+    hsvGreenHue: (json['hsvGreenHue'] as num?)?.toDouble(),
   );
 }
-
-// --- Main Home ----------------------------------------------------------------

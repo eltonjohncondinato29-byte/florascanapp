@@ -1180,6 +1180,13 @@ class _MyHomePageState extends State<MyHomePage> {
                     itemCount: _reports.length,
                     itemBuilder: (context, index) {
                       final r = _reports[index];
+                      final hasChlorophyll = r.chlorophyllValue != null;
+                      final statusColor = r.status == 'Healthy'
+                          ? kGreenMid
+                          : r.status == 'Leaf scanned'
+                          ? kTextLight
+                          : Colors.orange;
+
                       return Container(
                         margin: const EdgeInsets.only(bottom: 12),
                         padding: const EdgeInsets.all(16),
@@ -1194,53 +1201,84 @@ class _MyHomePageState extends State<MyHomePage> {
                             ),
                           ],
                         ),
-                        child: Row(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    r.leafName,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 14,
-                                      color: kTextDark,
-                                    ),
+                            // Header row: leaf name + timestamp
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  r.leafName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                    color: kTextDark,
                                   ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    'Width: ${r.widthCm}cm  Length: ${r.lengthCm}cm',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: kTextMid,
-                                    ),
+                                ),
+                                Text(
+                                  _formatTime(r.timestamp),
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: kTextLight,
                                   ),
-                                  Text(
-                                    'Chl: ${_chlorophyllLabel(r)}',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: kTextMid,
-                                    ),
-                                  ),
-                                  Text(
-                                    r.status,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: r.status == 'Healthy'
-                                          ? kGreenMid
-                                          : Colors.orange,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
-                            Text(
-                              _formatTime(r.timestamp),
-                              style: const TextStyle(
-                                fontSize: 11,
-                                color: kTextLight,
-                              ),
+                            const SizedBox(height: 8),
+                            const Divider(height: 1, color: kDivider),
+                            const SizedBox(height: 8),
+                            // Morphology metrics grid (2 cols)
+                            _buildHistoryMetricsGrid(r),
+                            const SizedBox(height: 8),
+                            const Divider(height: 1, color: kDivider),
+                            const SizedBox(height: 8),
+                            // Chlorophyll Index row
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Chlorophyll Index',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: kTextMid,
+                                  ),
+                                ),
+                                Text(
+                                  _chlorophyllLabel(r),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: hasChlorophyll
+                                        ? kGreenDark
+                                        : kTextLight,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            // Status row
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Status',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: kTextMid,
+                                  ),
+                                ),
+                                Text(
+                                  r.status,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: statusColor,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -1250,6 +1288,66 @@ class _MyHomePageState extends State<MyHomePage> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Builds a compact 2-column metrics grid for the History tab cards
+  Widget _buildHistoryMetricsGrid(LeafScanReport r) {
+    final metrics = <(String, String)>[
+      ('Length', '${r.lengthCm} cm'),
+      ('Width', '${r.widthCm} cm'),
+      (
+        'Proj. Area',
+        r.areaCm2 > 0 ? '${r.areaCm2.toStringAsFixed(2)} cm²' : '--',
+      ),
+      (
+        'Perimeter',
+        r.perimeterCm != null
+            ? '${r.perimeterCm!.toStringAsFixed(2)} cm'
+            : '--',
+      ),
+      (
+        'Aspect Ratio',
+        r.aspectRatio != null ? r.aspectRatio!.toStringAsFixed(2) : '--',
+      ),
+      (
+        'Hue (HSV)',
+        r.hsvGreenHue != null ? '${r.hsvGreenHue!.toStringAsFixed(1)}°' : '--',
+      ),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const colGap = 8.0;
+        final colWidth = (constraints.maxWidth - colGap) / 2;
+        return Wrap(
+          spacing: colGap,
+          runSpacing: 6,
+          children: metrics.map((m) {
+            final (label, value) = m;
+            return SizedBox(
+              width: colWidth,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(fontSize: 12, color: kTextLight),
+                  ),
+                  Text(
+                    value,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: kTextDark,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        );
+      },
     );
   }
 
@@ -2271,6 +2369,18 @@ class _MyHomePageState extends State<MyHomePage> {
                     itemCount: _reports.length,
                     itemBuilder: (context, index) {
                       final r = _reports[index];
+                      final hasChlorophyll = r.chlorophyllValue != null;
+                      final statusColor = r.status == 'Healthy'
+                          ? kGreenMid
+                          : r.status == 'Leaf scanned'
+                          ? kTextLight
+                          : Colors.orange;
+                      // Sensor-not-connected message is a warning — show in red.
+                      // Actual fertilizer recommendations are positive — show in green.
+                      final fertilizerColor = hasChlorophyll
+                          ? kGreenMid
+                          : Colors.redAccent;
+
                       return Container(
                         margin: const EdgeInsets.only(bottom: 14),
                         padding: const EdgeInsets.all(18),
@@ -2288,6 +2398,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            // Header: leaf name + timestamp
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2308,27 +2419,103 @@ class _MyHomePageState extends State<MyHomePage> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 10),
+                            const Divider(height: 1, color: kDivider),
+                            const SizedBox(height: 10),
+                            // Full morphology metrics (3-col grid, same style as scan card)
+                            _buildReportMetricsGrid(r),
+                            const SizedBox(height: 10),
+                            const Divider(height: 1, color: kDivider),
                             const SizedBox(height: 8),
-                            Text(
-                              'Width: ${r.widthCm}cm   Length: ${r.lengthCm}cm',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: kTextMid,
-                              ),
+                            // Chlorophyll Index row
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Chlorophyll Index',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: kTextMid,
+                                  ),
+                                ),
+                                Text(
+                                  _chlorophyllLabel(r),
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: hasChlorophyll
+                                        ? kGreenDark
+                                        : kTextLight,
+                                  ),
+                                ),
+                              ],
                             ),
-                            Text(
-                              'Chlorophyll Index: ${_chlorophyllLabel(r)}   Status: ${r.status}',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: kTextMid,
-                              ),
+                            const SizedBox(height: 4),
+                            // Status row
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Status',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: kTextMid,
+                                  ),
+                                ),
+                                Text(
+                                  r.status,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: statusColor,
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              r.fertilizer,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: kGreenMid,
+                            const SizedBox(height: 8),
+                            // Fertilizer recommendation / sensor notice
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 7,
+                              ),
+                              decoration: BoxDecoration(
+                                color: hasChlorophyll
+                                    ? kGreenPale
+                                    : Colors.red.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: hasChlorophyll
+                                      ? kGreenAccent.withValues(alpha: 0.5)
+                                      : Colors.redAccent.withValues(alpha: 0.4),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(
+                                    hasChlorophyll
+                                        ? Icons.eco_outlined
+                                        : Icons.bluetooth_disabled_outlined,
+                                    size: 14,
+                                    color: fertilizerColor,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      r.fertilizer,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: fertilizerColor,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
@@ -2339,6 +2526,86 @@ class _MyHomePageState extends State<MyHomePage> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Builds the full 3-column morphology metrics grid for Report cards
+  Widget _buildReportMetricsGrid(LeafScanReport r) {
+    final metrics = [
+      (Icons.height_rounded, 'Length (cm)', '${r.lengthCm} cm'),
+      (Icons.width_normal_rounded, 'Width (cm)', '${r.widthCm} cm'),
+      (
+        Icons.crop_free_rounded,
+        'Proj. Area',
+        r.areaCm2 > 0 ? '${r.areaCm2.toStringAsFixed(2)} cm²' : '--',
+      ),
+      (
+        Icons.rounded_corner_rounded,
+        'Perimeter',
+        r.perimeterCm != null
+            ? '${r.perimeterCm!.toStringAsFixed(2)} cm'
+            : '--',
+      ),
+      (
+        Icons.aspect_ratio_rounded,
+        'Aspect Ratio',
+        r.aspectRatio != null ? r.aspectRatio!.toStringAsFixed(2) : '--',
+      ),
+      (
+        Icons.color_lens_outlined,
+        'Hue (HSV)',
+        r.hsvGreenHue != null ? '${r.hsvGreenHue!.toStringAsFixed(1)}°' : '--',
+      ),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final tileWidth = (constraints.maxWidth - 16) / 3;
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: metrics.map((m) {
+            final (icon, label, value) = m;
+            return SizedBox(
+              width: tileWidth,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                decoration: BoxDecoration(
+                  color: kGreenPale,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(icon, size: 13, color: kGreenMid),
+                    const SizedBox(height: 4),
+                    Text(
+                      value,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: kTextDark,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 9,
+                        color: kTextLight,
+                        fontWeight: FontWeight.w500,
+                        height: 1.2,
+                      ),
+                      maxLines: 2,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
     );
   }
 
