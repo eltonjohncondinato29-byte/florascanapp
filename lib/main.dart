@@ -7,7 +7,7 @@ import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+// import 'package:flutter/services.dart' show rootBundle; // Unused
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -17,6 +17,11 @@ part 'src/app_root.dart';
 part 'src/auth_page.dart';
 part 'src/leaf_scan_report.dart';
 part 'src/home_page.dart';
+part 'src/crop_data_models.dart';
+part 'src/crop_service.dart';
+part 'src/admin_crop_management.dart';
+part 'src/admin_activity_log.dart';
+part 'src/crop_validation_dialog.dart';
 
 // Global reference for Supabase
 late final SupabaseClient supabase;
@@ -53,6 +58,31 @@ Future<int> _readSecureInt(String key) async {
 /// Writes an integer value to secure storage by key
 Future<void> _writeSecureInt(String key, int value) async {
   await appSecureStorage.write(key: key, value: value.toString());
+}
+
+/// Checks if the current user is an admin
+/// Admin users have 'admin' role in their user metadata
+Future<UserRole> _getUserRole() async {
+  try {
+    final user = supabase.auth.currentUser;
+    if (user == null) return UserRole.regular;
+
+    // Check if user has admin role in metadata
+    final userMetadata = user.userMetadata;
+    if (userMetadata != null) {
+      final role = userMetadata['role'] as String?;
+      if (role == 'admin') return UserRole.admin;
+    }
+
+    return UserRole.regular;
+  } catch (_) {
+    return UserRole.regular;
+  }
+}
+
+/// Gets the current user's role asynchronously
+Future<UserRole> getCurrentUserRole() async {
+  return _getUserRole();
 }
 
 /// Main application entry point - initializes Supabase and runs the app

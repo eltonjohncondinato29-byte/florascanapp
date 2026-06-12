@@ -33,7 +33,7 @@ class _MyHomePageState extends State<MyHomePage> {
   int _selectedIndex = 0;
   bool _isScanning = false;
   bool _isConnected = false;
-  String _connectionStatus = 'Disconnected';
+  String _connectionStatus = 'Disconnected'; // ignore: unused_field
   int? _chlorophyllValue;
   final List<LeafScanReport> _reports = [];
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -50,17 +50,30 @@ class _MyHomePageState extends State<MyHomePage> {
   double? _hsvGreenHue;
 
   // Pre-scan crop selection state
-  String? _selectedCrop;
+  String? _selectedCrop; // ignore: unused_field
   bool _showCropSelector = true;
+  late Future<List<CropProfile>> _cropsFuture;
+  List<CropProfile> _availableCrops = [];
+  CropProfile? _selectedCropProfile;
 
   // Save success notice below scanner frame
   bool _showSaveSuccess = false;
+
+  // User role for admin features
+  late Future<UserRole> _userRoleFuture;
 
   @override
   void initState() {
     super.initState();
     _loadReports();
     _initializeCamera();
+    _cropsFuture = CropService.fetchCropsForScanning().then((crops) {
+      if (mounted) {
+        setState(() => _availableCrops = crops);
+      }
+      return crops;
+    });
+    _userRoleFuture = _getUserRole();
   }
 
   @override
@@ -72,6 +85,11 @@ class _MyHomePageState extends State<MyHomePage> {
     _cameraController?.dispose();
     _saveReports();
     super.dispose();
+  }
+
+  /// Gets the user's role
+  Future<UserRole> _getUserRole() async {
+    return getCurrentUserRole();
   }
 
   /// Generates user-specific storage key for leaf scan reports
@@ -337,11 +355,11 @@ class _MyHomePageState extends State<MyHomePage> {
             _isCameraActive = false;
           });
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
+            SnackBar(
+              content: const Text(
                 '⚠️  No leaf detected. Place a matte blue or black card behind the leaf and try again.',
               ),
-              backgroundColor: ui.Color.fromARGB(1, 255, 95, 95),
+              backgroundColor: Colors.red.shade700,
             ),
           );
         }
@@ -406,15 +424,7 @@ class _MyHomePageState extends State<MyHomePage> {
   /// Analyzes the captured frame for leaf morphology using the pre-selected crop type.
   Future<_LeafScanAnalysis?> _analyzeLeafImage(String imagePath) async {
     try {
-      if (imagePath.isEmpty) return null;
-
-      final cropKey = _selectedCrop == 'Cucumber'
-          ? 'Cucumber Leaf'
-          : _selectedCrop == 'Robusta Coffee'
-          ? 'Robusta Coffee Leaf'
-          : null;
-
-      if (cropKey == null) return null;
+      if (imagePath.isEmpty || _selectedCropProfile == null) return null;
 
       final capturedProfile = await _createLeafProfileFromFile(imagePath);
       await Future<void>.delayed(const Duration(milliseconds: 650));
@@ -423,10 +433,13 @@ class _MyHomePageState extends State<MyHomePage> {
         return null;
       }
 
-      final measurements = _estimateLeafMeasurements(cropKey, capturedProfile);
+      final measurements = _estimateLeafMeasurements(
+        _selectedCropProfile!,
+        capturedProfile,
+      );
 
       return _LeafScanAnalysis(
-        leafType: cropKey,
+        leafType: _selectedCropProfile!.cropName,
         lengthCm: measurements['length']!,
         widthCm: measurements['width']!,
         areaCm2: measurements['areaCm2']!,
@@ -559,7 +572,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Map<String, double> _estimateLeafMeasurements(
-    String leafType,
+    CropProfile cropProfile,
     _LeafImageProfile profile,
   ) {
     final sizeSignal = ((profile.bboxCoverage - 0.05) / 0.45)
@@ -572,22 +585,15 @@ class _MyHomePageState extends State<MyHomePage> {
         .clamp(0.0, 1.0)
         .toDouble();
 
-    late double length;
-    late double width;
+    // Use the standard measurements from the crop profile
+    // Scale based on the detected signal
+    final minLength = cropProfile.standardLeafLengthCm * 0.7;
+    final maxLength = cropProfile.standardLeafLengthCm * 1.3;
+    final length = minLength + (signal * (maxLength - minLength));
 
-    switch (leafType) {
-      case 'Cucumber Leaf':
-        length = 4.5 + signal * 2.5;
-        width = (length / profile.longToShortRatio).clamp(3.0, 5.6).toDouble();
-        break;
-      case 'Robusta Coffee Leaf':
-        length = 8.0 + signal * 7.0;
-        width = (length / profile.longToShortRatio).clamp(4.0, 8.0).toDouble();
-        break;
-      default:
-        length = 0;
-        width = 0;
-    }
+    final minWidth = cropProfile.standardLeafWidthCm * 0.7;
+    final maxWidth = cropProfile.standardLeafWidthCm * 1.3;
+    final width = minWidth + (signal * (maxWidth - minWidth));
 
     final areaCm2 = double.parse((pi / 4 * length * width).toStringAsFixed(2));
     final a = length / 2;
@@ -613,22 +619,79 @@ class _MyHomePageState extends State<MyHomePage> {
     };
   }
 
-  // ==================== FIX: SAVE SCAN REPORT ====================
-  // Saves locally first (always), then attempts cloud upload.
-  // Extended morphology fields (perimeterCm, aspectRatio, hsvGreenHue)
-  // are now correctly included in the LeafScanReport.
+  // ==================== SAVE SCAN REPORT WITH VALIDATION ====================
   Future<void> _saveScanReport() async {
+    // Capture before any await to avoid use_build_context_synchronously lint.
+    final messenger = ScaffoldMessenger.of(context);
+
     final name = _leafNameController.text.trim();
     final lengthCm = double.tryParse(_lengthController.text) ?? 0;
     final widthCm = double.tryParse(_widthController.text) ?? 0;
     final chlorophyll = _chlorophyllValue;
 
-    if (name.isEmpty || lengthCm <= 0 || widthCm <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
+    if (name.isEmpty ||
+        lengthCm <= 0 ||
+        widthCm <= 0 ||
+        _selectedCropProfile == null) {
+      messenger.showSnackBar(
         const SnackBar(content: Text('Please scan a supported leaf first.')),
       );
       return;
     }
+
+    // ========== CROP VALIDATION ==========
+    // Perform validation against selected crop
+    final validationResult = await CropService.validateScannedLeaf(
+      selectedCrop: _selectedCropProfile!,
+      scannedLengthCm: lengthCm,
+      scannedWidthCm: widthCm,
+      scannedPerimeterCm: _perimeterCm ?? 0,
+      scannedAspectRatio: _aspectRatio ?? 0,
+      scannedHue: _hsvGreenHue ?? 0,
+      scannedSpad: chlorophyll,
+      allCrops: _availableCrops,
+    );
+
+    // Check confidence level and act accordingly
+    if (validationResult.confidenceLevel == ConfidenceLevel.low) {
+      // LOW CONFIDENCE: Prevent saving, require user to select correct crop
+      if (!mounted) return;
+
+      final shouldContinue = await showCropValidationDialog(
+        context,
+        validationResult,
+      );
+
+      // Guard after the second await before touching context/messenger.
+      if (!mounted) return;
+      if (!shouldContinue) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Scan cancelled. Please select the correct crop.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+    } else if (validationResult.confidenceLevel == ConfidenceLevel.medium) {
+      // MEDIUM CONFIDENCE: Show warning dialog, allow user to continue or cancel
+      if (!mounted) return;
+
+      final shouldContinue = await showCropValidationDialog(
+        context,
+        validationResult,
+      );
+
+      // Guard after the second await before touching context/messenger.
+      if (!mounted) return;
+      if (!shouldContinue) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Scan cancelled by user.')),
+        );
+        return;
+      }
+    }
+    // HIGH CONFIDENCE: Continue without dialog
 
     final areaCm2 =
         _areaCm2 ??
@@ -690,7 +753,7 @@ class _MyHomePageState extends State<MyHomePage> {
         });
       }
 
-      await supabase.schema('florascan').from('leaf_scans').insert(scanData);
+      await supabase.from('leaf_scans').insert(scanData);
     } catch (e) {
       // Cloud upload failed, but local save already succeeded
       debugPrint('Cloud upload failed (local save OK): $e');
@@ -713,24 +776,54 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final tabs = [
-      _buildDashboardTab(),
-      _buildHistoryTab(),
-      _buildScanTab(),
-      _buildReportsTab(),
-      _buildProfileTab(),
-    ];
+    return FutureBuilder<UserRole>(
+      future: _userRoleFuture,
+      builder: (context, roleSnapshot) {
+        final isAdmin = roleSnapshot.data == UserRole.admin;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF5F7F5),
-      body: tabs[_selectedIndex],
-      bottomNavigationBar: _selectedIndex == 2 ? null : _buildBottomNav(),
+        final baseTabs = [
+          _buildDashboardTab(),
+          _buildHistoryTab(),
+          _buildScanTab(),
+          _buildReportsTab(),
+          _buildProfileTab(),
+        ];
+
+        final adminTabs = isAdmin
+            ? [
+                AdminCropManagementPage(
+                  onCropChanged: () {
+                    setState(() {
+                      _cropsFuture = CropService.fetchCropsForScanning().then((
+                        crops,
+                      ) {
+                        if (mounted) {
+                          setState(() => _availableCrops = crops);
+                        }
+                        return crops;
+                      });
+                    });
+                  },
+                ),
+                const AdminActivityLogPage(),
+              ]
+            : <Widget>[];
+
+        final allTabs = [...baseTabs, ...adminTabs];
+
+        return Scaffold(
+          backgroundColor: const Color(0xFFF5F7F5),
+          body: allTabs[_selectedIndex],
+          bottomNavigationBar: _buildBottomNav(isAdmin, baseTabs.length),
+        );
+      },
     );
   }
 
-  // ==================== BOTTOM NAVIGATION ====================
-  Widget _buildBottomNav() {
-    final items = [
+  /// Updates the bottom nav to include admin items for admin users
+  Widget _buildBottomNav(bool isAdmin, int baseTabCount) {
+    // Base items (always 5)
+    final baseItems = [
       {'icon': Icons.home_filled, 'label': 'Dashboard'},
       {'icon': Icons.history, 'label': 'History'},
       {'icon': Icons.qr_code_scanner, 'label': ''},
@@ -738,82 +831,99 @@ class _MyHomePageState extends State<MyHomePage> {
       {'icon': Icons.person_outline, 'label': 'Profile'},
     ];
 
-    return Container(
-      height: 70,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.07),
-            blurRadius: 16,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: List.generate(items.length, (i) {
-          final isCenter = i == 2;
-          final isSelected = _selectedIndex == i;
-          final icon = items[i]['icon'] as IconData;
-          final label = items[i]['label'] as String;
+    // Admin items only append to the right
+    final adminItems = isAdmin
+        ? [
+            {'icon': Icons.local_florist, 'label': 'Crops'},
+            {'icon': Icons.assignment_outlined, 'label': 'Activity'},
+          ]
+        : <Map<String, dynamic>>[];
 
-          if (isCenter) {
-            return GestureDetector(
-              onTap: () => _selectTab(i),
-              child: Container(
-                width: 58,
-                height: 58,
-                decoration: BoxDecoration(
-                  color: kGreenMid,
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: kGreenMid.withValues(alpha: 0.4),
-                      blurRadius: 14,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.qr_code_scanner,
-                  color: Colors.white,
-                  size: 26,
-                ),
-              ),
-            );
-          }
+    final allItems = [...baseItems, ...adminItems];
+    final scannerIndex = 2;
 
-          return GestureDetector(
-            onTap: () => _selectTab(i),
-            child: SizedBox(
-              width: 60,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    icon,
-                    size: 22,
-                    color: isSelected ? kGreenMid : const Color(0xFFB0BEC5),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: isSelected ? kGreenMid : const Color(0xFFB0BEC5),
-                      fontWeight: isSelected
-                          ? FontWeight.w700
-                          : FontWeight.normal,
+    return _selectedIndex == scannerIndex
+        ? const SizedBox.shrink()
+        : Container(
+            height: 70,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.07),
+                  blurRadius: 16,
+                  offset: const Offset(0, -4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: List.generate(allItems.length, (i) {
+                final isCenter = i == scannerIndex;
+                final isSelected = _selectedIndex == i;
+                final icon = allItems[i]['icon'] as IconData;
+                final label = allItems[i]['label'] as String;
+
+                if (isCenter) {
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () => _selectTab(i),
+                      child: Container(
+                        width: 58,
+                        height: 58,
+                        decoration: BoxDecoration(
+                          color: kGreenMid,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: kGreenMid.withValues(alpha: 0.4),
+                              blurRadius: 14,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.qr_code_scanner,
+                          color: Colors.white,
+                          size: 26,
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () => _selectTab(i),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icon,
+                          size: 22,
+                          color: isSelected
+                              ? kGreenMid
+                              : const Color(0xFFB0BEC5),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isSelected
+                                ? kGreenMid
+                                : const Color(0xFFB0BEC5),
+                            fontWeight: isSelected
+                                ? FontWeight.w700
+                                : FontWeight.normal,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                );
+              }),
             ),
           );
-        }),
-      ),
-    );
   }
 
   // ==================== DASHBOARD TAB ====================
@@ -1334,9 +1444,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // ==================== STEP 1: CROP SELECTOR ====================
   Widget _buildCropSelectorStep() {
-    const cucumber = 'Cucumber';
-    const coffee = 'Robusta Coffee';
-
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1424,29 +1531,58 @@ class _MyHomePageState extends State<MyHomePage> {
           ),
           const SizedBox(height: 28),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Column(
-                children: [
-                  _buildCropCard(
-                    cropKey: cucumber,
-                    scientificName: 'Cucumis sativus L.',
-                    description:
-                        'Broad, palmate leaves with serrated margins and prominent veins.',
-                    icon: Icons.eco_outlined,
-                    accentColor: const Color(0xFF43A047),
+            child: FutureBuilder<List<CropProfile>>(
+              future: _cropsFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                if (snapshot.hasError) {
+                  return Center(
+                    child: Text('Error loading crops: ${snapshot.error}'),
+                  );
+                }
+
+                final crops = snapshot.data ?? [];
+
+                if (crops.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.grass, size: 80, color: Colors.grey[300]),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'No crops available',
+                          style: TextStyle(fontSize: 16),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Ask an administrator to add crops',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF999999),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: ListView.separated(
+                    itemCount: crops.length,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 14),
+                    itemBuilder: (context, index) {
+                      final crop = crops[index];
+                      return _buildCropSelectionCard(crop);
+                    },
                   ),
-                  const SizedBox(height: 14),
-                  _buildCropCard(
-                    cropKey: coffee,
-                    scientificName: 'Coffea canephora var. Robusta',
-                    description:
-                        'Elongated, glossy leaves with smooth margins and wavy edges.',
-                    icon: Icons.local_cafe_outlined,
-                    accentColor: const Color(0xFF6D4C41),
-                  ),
-                ],
-              ),
+                );
+              },
             ),
           ),
           const SizedBox(height: 16),
@@ -1456,7 +1592,7 @@ class _MyHomePageState extends State<MyHomePage> {
               width: double.infinity,
               height: 52,
               child: ElevatedButton(
-                onPressed: _selectedCrop != null
+                onPressed: _selectedCropProfile != null
                     ? () {
                         setState(() {
                           _showCropSelector = false;
@@ -1506,117 +1642,92 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  Widget _buildCropCard({
-    required String cropKey,
-    required String scientificName,
-    required String description,
-    required IconData icon,
-    required Color accentColor,
-  }) {
-    final isSelected = _selectedCrop == cropKey;
+  /// Builds a crop selection card
+  Widget _buildCropSelectionCard(CropProfile crop) {
+    final isSelected = _selectedCropProfile?.id == crop.id;
+
     return GestureDetector(
-      onTap: () => setState(() => _selectedCrop = cropKey),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeInOut,
-        width: double.infinity,
-        padding: const EdgeInsets.all(18),
+      onTap: () {
+        setState(() {
+          _selectedCropProfile = crop;
+          _selectedCrop = crop.cropName;
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: isSelected ? accentColor.withValues(alpha: 0.07) : kCardBg,
-          borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: isSelected ? accentColor : const Color(0xFFE8E8E8),
-            width: isSelected ? 2.0 : 1.0,
+            color: isSelected ? kGreenMid : Colors.grey[300]!,
+            width: isSelected ? 2 : 1,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: isSelected
-                  ? accentColor.withValues(alpha: 0.12)
-                  : Colors.black.withValues(alpha: 0.05),
-              blurRadius: isSelected ? 16 : 8,
-              offset: const Offset(0, 3),
-            ),
-          ],
+          borderRadius: BorderRadius.circular(12),
+          color: isSelected ? kGreenPale : Colors.white,
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? accentColor.withValues(alpha: 0.14)
-                    : const Color(0xFFF0F0F0),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(
-                icon,
-                color: isSelected ? accentColor : kTextLight,
-                size: 26,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    cropKey,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: isSelected ? accentColor : kTextDark,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    scientificName,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontStyle: FontStyle.italic,
-                      color: isSelected
-                          ? accentColor.withValues(alpha: 0.75)
-                          : kTextLight,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    description,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    crop.cropName,
                     style: const TextStyle(
-                      fontSize: 12,
-                      color: kTextMid,
-                      height: 1.3,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isSelected ? accentColor : Colors.transparent,
-                border: Border.all(
-                  color: isSelected ? accentColor : const Color(0xFFCCCCCC),
-                  width: 2,
                 ),
-              ),
-              child: isSelected
-                  ? const Icon(Icons.check, color: Colors.white, size: 14)
-                  : null,
+                if (isSelected)
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: kGreenMid,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.check,
+                      size: 16,
+                      color: Colors.white,
+                    ),
+                  ),
+              ],
             ),
+            const SizedBox(height: 8),
+            _buildCropInfoRow('SPAD', '${crop.referenceSpadIndex}'),
+            _buildCropInfoRow(
+              'Leaf',
+              '${crop.standardLeafLengthCm}×${crop.standardLeafWidthCm} cm',
+            ),
+            _buildCropInfoRow('Color', crop.standardLeafColor),
           ],
         ),
       ),
     );
   }
 
+  /// Builds a crop info row for the selection card
+  Widget _buildCropInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF999999)),
+            ),
+          ),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 12))),
+        ],
+      ),
+    );
+  }
+
   // ==================== STEP 2: MORPHOLOGY SCANNER ====================
   Widget _buildMorphologyScannerStep() {
-    final cropLabel = _selectedCrop ?? 'Leaf';
+    final cropLabel = _selectedCropProfile?.cropName ?? 'Leaf';
 
     final bool isScannedSuccess = _fieldsLocked;
     final bool isAnalyzingNow = _isAnalyzing;
@@ -2228,64 +2339,6 @@ class _MyHomePageState extends State<MyHomePage> {
         width: previewSize.height,
         height: previewSize.width,
         child: CameraPreview(controller),
-      ),
-    );
-  }
-
-  // ==================== SCAN INPUT FIELD (kept for internal use) ====================
-  Widget _scanField(
-    String hint,
-    TextEditingController controller, {
-    TextInputType keyboard = TextInputType.text,
-    bool readOnly = false,
-  }) {
-    final hasValue = controller.text.trim().isNotEmpty;
-
-    return SizedBox(
-      height: 44,
-      child: TextField(
-        controller: controller,
-        keyboardType: keyboard,
-        readOnly: readOnly,
-        style: TextStyle(
-          fontSize: 13,
-          color: hasValue ? kGreenMid : kTextDark,
-          fontWeight: hasValue ? FontWeight.w600 : FontWeight.normal,
-        ),
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: const TextStyle(color: kTextLight, fontSize: 13),
-          filled: true,
-          fillColor: hasValue ? kGreenPale : Colors.white,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 0,
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
-            borderSide: BorderSide(
-              color: hasValue ? kGreenAccent : Colors.transparent,
-              width: hasValue ? 1.5 : 0,
-            ),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
-            borderSide: BorderSide(
-              color: hasValue ? kGreenAccent : Colors.transparent,
-              width: hasValue ? 1.5 : 0,
-            ),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(22),
-            borderSide: BorderSide(
-              color: hasValue ? kGreenMid : kGreenAccent,
-              width: 1.2,
-            ),
-          ),
-          suffixIcon: hasValue
-              ? const Icon(Icons.check_circle, color: kGreenAccent, size: 20)
-              : null,
-        ),
       ),
     );
   }
